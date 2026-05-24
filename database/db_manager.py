@@ -287,10 +287,22 @@ class DatabaseManager:
 
     def get_mailboxes(self) -> list:
         conn = self._get_mailstore_conn()
+        # sort_order-Spalte vorhanden? (wird vom FolderOrder-Addon angelegt)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(mailboxes)").fetchall()]
+        if "sort_order" in cols:
+            return list(conn.execute(
+                "SELECT * FROM mailboxes ORDER BY sort_order, id"
+            ).fetchall())
         return list(conn.execute("SELECT * FROM mailboxes ORDER BY id").fetchall())
 
     def get_folders(self, mailbox_id: int) -> list:
         conn = self._get_mailstore_conn()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(folders)").fetchall()]
+        if "sort_order" in cols:
+            return list(conn.execute(
+                "SELECT * FROM folders WHERE mailbox_id = ? ORDER BY sort_order, id",
+                (mailbox_id,)
+            ).fetchall())
         return list(conn.execute(
             "SELECT * FROM folders WHERE mailbox_id = ? ORDER BY folder_type, name",
             (mailbox_id,)

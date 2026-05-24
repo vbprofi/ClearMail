@@ -1,14 +1,14 @@
 """
 Addon: FolderOrder
 Erweitert das Kontextmenü der Ordnerbaumstruktur um:
-  • "Position nach oben"   – verschiebt Ordner/Postfach eine Stufe höher
-  • "Position nach unten"  – verschiebt Ordner/Postfach eine Stufe tiefer
+  • "Position nach oben"   – verschiebt Element eine Stufe höher
+  • "Position nach unten"  – verschiebt Element eine Stufe tiefer
 
-Die Sortierung wird über eine 'sort_order'-Spalte in der DB gespeichert.
-Da die Demo-DB diese Spalte nicht enthält, wird sie beim ersten Aufruf angelegt.
+Unterscheidet korrekt zwischen Postfächern (mailboxes-Tabelle)
+und Ordnern (folders-Tabelle).
 
-Installation:
-  Dieses Verzeichnis nach ~/.mailclient/addons/folder_order/ kopieren.
+Die Sortierung wird über eine 'sort_order'-Spalte in der DB gespeichert,
+die beim ersten Addon-Load automatisch angelegt wird.
 """
 
 import wx
@@ -18,160 +18,157 @@ from core.addon_manager import AddonBase
 class Addon(AddonBase):
 
     NAME        = "FolderOrder"
-    VERSION     = "1.0.0"
-    DESCRIPTION = "Ordner per Kontextmenü nach oben/unten verschieben"
+    VERSION     = "1.1.0"
+    DESCRIPTION = "Ordner und Postfächer per Kontextmenü sortieren"
 
     def on_load(self):
-        self._ensure_sort_column()
+        self._ensure_sort_columns()
 
     # ------------------------------------------------------------------ #
-    #  Kontextmenü-Einträge                                               #
+    #  Kontextmenü                                                        #
     # ------------------------------------------------------------------ #
 
     def get_folder_context_items(self, item_type: str, item_data: dict) -> list:
-        """Gibt Einträge für Ordner UND Postfächer zurück."""
-        if item_type not in ("folder", "mailbox"):
+        if item_type not in ("folder", "mailbox") or not item_data:
             return []
-        if not item_data:
-            return []
-
         return [
-            {
-                "label":   "Position nach oben",
-                "handler": self._move_up,
-                "enabled": True,
-            },
-            {
-                "label":   "Position nach unten",
-                "handler": self._move_down,
-                "enabled": True,
-            },
+            {"label": "Position nach oben",  "handler": self._move_up,   "enabled": True},
+            {"label": "Position nach unten", "handler": self._move_down, "enabled": True},
         ]
 
     # ------------------------------------------------------------------ #
-    #  Handler                                                            #
+    #  Move-Logik                                                         #
     # ------------------------------------------------------------------ #
 
     def _move_up(self, tree_item, item_data: dict):
-        """Verschiebt das Element eine Position nach oben (kleinere sort_order)."""
-        self._move(tree_item, item_data, direction=-1)
+        self._move(item_data, direction=-1)
 
     def _move_down(self, tree_item, item_data: dict):
-        """Verschiebt das Element eine Position nach unten (größere sort_order)."""
-        self._move(tree_item, item_data, direction=+1)
+        self._move(item_data, direction=+1)
 
-    def _move(self, tree_item, item_data: dict, direction: int):
+    def _move(self, item_data: dict, direction: int):
         """
-        Kernlogik: Tauscht sort_order mit dem Nachbar-Element.
-        direction: -1 = nach oben, +1 = nach unten
+        Tauscht sort_order mit dem Nachbar-Element.
+
+        Postfach  → Tabelle mailboxes, Geschwister = alle Postfächer
+        Ordner    → Tabelle folders,   Geschwister = Ordner mit gleichem
+                    mailbox_id UND parent_id
         """
-        db     = self.controller.db
-        conn   = db._get_mailstore_conn()
+        self._ensure_sort_columns()   # Spalte sicher vorhanden
+
+        conn    = self.controller.db._get_mailstore_conn()
         item_id = item_data.get("id")
-
         if not item_id:
             return
 
-        # Ist es ein Ordner oder ein Postfach?
-        if "mailbox_id" in item_data:
-            table      = "folders"
-            id_col     = "id"
-            # Geschwister: gleicher parent_id und mailbox_id
-            parent_id  = item_data.get("parent_id")
-            mailbox_id = item_data.get("mailbox_id")
+        # ---- Postfach ------------------------------------------------
+        if "account_id" in item_data:
+            # Postfach-Datensatz: hat account_id, kein mailbox_id
+            siblings = conn.execute(
+                "SELECT id, sort_order FROM mailboxes ORDER BY sort_order, id"
+            ).fetchall()
+            table = "mailboxes"
+
+        # ---- Ordner --------------------------------------------------
+        elif "mailbox_id" in item_data:
+            mailbox_id = item_data["mailbox_id"]
+            parent_id  = item_data.get("parent_id")   # None = Wurzel-Ordner
+
             if parent_id is None:
                 siblings = conn.execute(
                     "SELECT id, sort_order FROM folders "
-                    "WHERE mailbox_id = ? AND parent_id IS NULL ORDER BY sort_order, id",
+                    "WHERE mailbox_id = ? AND parent_id IS NULL "
+                    "ORDER BY sort_order, id",
                     (mailbox_id,)
                 ).fetchall()
             else:
                 siblings = conn.execute(
                     "SELECT id, sort_order FROM folders "
-                    "WHERE mailbox_id = ? AND parent_id = ? ORDER BY sort_order, id",
+                    "WHERE mailbox_id = ? AND parent_id = ? "
+                    "ORDER BY sort_order, id",
                     (mailbox_id, parent_id)
                 ).fetchall()
-        else:
-            # Postfach
-            table    = "mailboxes"
-            id_col   = "id"
-            siblings = conn.execute(
-                "SELECT id, sort_order FROM mailboxes ORDER BY sort_order, id"
-            ).fetchall()
+            table = "folders"
 
-        # Aktuelle Position im Geschwister-Array ermitteln
+        else:
+            return  # Unbekannter Typ
+
+        # ---- Position im Geschwister-Array finden --------------------
         ids = [row[0] for row in siblings]
         if item_id not in ids:
-            return
-        pos = ids.index(item_id)
-        swap_pos = pos + direction
-
-        if swap_pos < 0 or swap_pos >= len(ids):
-            direction_str = "oben" if direction == -1 else "unten"
             wx.MessageBox(
-                f"Element befindet sich bereits ganz {direction_str}.",
-                "Position ändern",
-                wx.OK | wx.ICON_INFORMATION
+                "Element nicht in der Geschwisterliste gefunden.\n"
+                "Bitte die Anwendung neu starten.",
+                "Fehler", wx.OK | wx.ICON_ERROR
             )
             return
 
-        swap_id = ids[swap_pos]
+        pos      = ids.index(item_id)
+        swap_pos = pos + direction
 
-        # sort_order-Werte tauschen
-        order_a = siblings[pos][1]     # aktuelles Element
-        order_b = siblings[swap_pos][1]  # Tausch-Element
+        if swap_pos < 0 or swap_pos >= len(ids):
+            msg = "ganz oben" if direction == -1 else "ganz unten"
+            wx.MessageBox(
+                f"Das Element befindet sich bereits {msg}.",
+                "Position ändern", wx.OK | wx.ICON_INFORMATION
+            )
+            return
 
-        if order_a == order_b:
-            # Gleiche Werte → neue sequenzielle Werte vergeben
-            for i, (sid, _) in enumerate(siblings):
-                conn.execute(
-                    f"UPDATE {table} SET sort_order = ? WHERE {id_col} = ?",
-                    (i * 10, sid)
-                )
-            # Neu berechnete Werte
-            order_a = pos * 10
-            order_b = swap_pos * 10
+        # ---- sort_order-Werte sicherstellen (keine Duplikate) --------
+        # Immer neu sequenziell vergeben → robust gegen NULL-Werte
+        for i, (sid, _) in enumerate(siblings):
+            conn.execute(
+                f"UPDATE {table} SET sort_order = ? WHERE id = ?",
+                (i * 10, sid)
+            )
+
+        # Jetzt tauschen: pos*10 ↔ swap_pos*10
+        order_a = pos      * 10
+        order_b = swap_pos * 10
 
         conn.execute(
-            f"UPDATE {table} SET sort_order = ? WHERE {id_col} = ?",
-            (order_b, item_id)
+            f"UPDATE {table} SET sort_order = ? WHERE id = ?",
+            (order_b, ids[pos])
         )
         conn.execute(
-            f"UPDATE {table} SET sort_order = ? WHERE {id_col} = ?",
-            (order_a, swap_id)
+            f"UPDATE {table} SET sort_order = ? WHERE id = ?",
+            (order_a, ids[swap_pos])
         )
         conn.commit()
 
-        # Baum neu laden um neue Reihenfolge anzuzeigen
-        # Wir suchen das FolderPanel im Widget-Baum
-        folder_panel = self._find_folder_panel()
-        if folder_panel:
-            folder_panel.reload()
+        # ---- Baum neu laden ------------------------------------------
+        panel = self._find_folder_panel()
+        if panel:
+            panel.reload()
 
     # ------------------------------------------------------------------ #
     #  Hilfsmethoden                                                      #
     # ------------------------------------------------------------------ #
 
-    def _ensure_sort_column(self):
-        """Fügt sort_order-Spalte hinzu falls noch nicht vorhanden."""
-        db   = self.controller.db
-        conn = db._get_mailstore_conn()
-        for table in ("folders", "mailboxes"):
-            cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    def _ensure_sort_columns(self):
+        """Legt sort_order-Spalte an falls nicht vorhanden und befüllt sie."""
+        conn = self.controller.db._get_mailstore_conn()
+        for table in ("mailboxes", "folders"):
+            cols = [r[1] for r in conn.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()]
             if "sort_order" not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN sort_order INTEGER DEFAULT 0")
-                # Initiale Werte setzen
-                rows = conn.execute(f"SELECT id FROM {table} ORDER BY id").fetchall()
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN sort_order INTEGER DEFAULT 0"
+                )
+                rows = conn.execute(
+                    f"SELECT id FROM {table} ORDER BY id"
+                ).fetchall()
                 for i, (rid,) in enumerate(rows):
-                    conn.execute(f"UPDATE {table} SET sort_order = ? WHERE id = ?", (i * 10, rid))
+                    conn.execute(
+                        f"UPDATE {table} SET sort_order = ? WHERE id = ?",
+                        (i * 10, rid)
+                    )
         conn.commit()
 
     def _find_folder_panel(self):
-        """Sucht das FolderPanel über die wx-App."""
         app = wx.GetApp()
         if not app:
             return None
         frame = app.GetTopWindow()
-        if not frame:
-            return None
         return getattr(frame, "folder_panel", None)

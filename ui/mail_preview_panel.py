@@ -97,16 +97,17 @@ class MailPreviewPanel(wx.Panel):
     def _on_field_key(self, event: wx.KeyEvent):
         """
         Manuelle Tab-Navigation für readonly TextCtrl-Felder.
-        wx.TE_READONLY kann auf Windows den Tab-Stop entfernen.
+        Verwendet GetEventObject() statt FindFocus() – zuverlässiger auf Windows.
         """
         key   = event.GetKeyCode()
         shift = event.ShiftDown()
 
         if key == wx.WXK_TAB:
-            focused = self.FindFocus()
-            fields  = self._header_fields
-            if focused in fields:
-                idx = fields.index(focused)
+            # GetEventObject() liefert immer das Control das den Event ausgelöst hat
+            source = event.GetEventObject()
+            fields = self._header_fields
+            if source in fields:
+                idx = fields.index(source)
                 if shift:
                     next_idx = (idx - 1) % len(fields)
                 else:
