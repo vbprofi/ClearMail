@@ -2,10 +2,13 @@
 MailPreviewPanel – Mail-Vorschau (unten rechts)
 
 Screenreader-Optimierung:
-  - StaticText direkt im gleichen Panel vor dem TextCtrl → AT liest Label
-  - SetName() auf jedem TextCtrl = Label-Text (Fallback für alle AT)
-  - Tab-Reihenfolge ergibt sich aus der Erstellungsreihenfolge im Panel
-  - KEIN MoveAfterInTabOrder (Controls müssen direkte Geschwister sein)
+  1. StaticText-Label wird ZUERST erzeugt (niedrigerer HWND-Index)
+     → Windows AT-API (UIA/MSAA) verknüpft automatisch Label mit nachfolgendem Control
+  2. SetName() auf jedem TextCtrl = Label-Text (expliziter Fallback für NVDA/JAWS)
+  3. Tab-Stop für readonly TextCtrl: wx.TE_READONLY entfernt auf Windows den Tab-Stop!
+     Lösung: wx.WANTS_CHARS NICHT setzen, stattdessen nach dem Erzeugen
+     SetWindowStyleFlag mit dem Tab-Stop-Flag ergänzen (Windows: WS_TABSTOP = 0x00010000)
+     Portabler Workaround: EVT_KEY_DOWN abfangen und Tab manuell weiterleiten.
 """
 
 import wx
@@ -21,7 +24,7 @@ class MailPreviewPanel(wx.Panel):
         self._build_ui()
 
     # ------------------------------------------------------------------ #
-    #  UI – alle Controls direkt in diesem Panel (keine Sub-Panels)       #
+    #  UI                                                                 #
     # ------------------------------------------------------------------ #
 
     def _build_ui(self):
@@ -32,38 +35,25 @@ class MailPreviewPanel(wx.Panel):
         lbl_header.SetFont(lbl_header.GetFont().Bold())
         outer.Add(lbl_header, 0, wx.ALL, 4)
 
-        # ---- Header-Grid: StaticText + TextCtrl direkt im selben Panel ----
-        # FlexGridSizer(cols=2): Spalte 0 = Label, Spalte 1 = Feld
-        # Tab-Reihenfolge = Erstellungsreihenfolge der TextCtrl-Objekte
         grid = wx.FlexGridSizer(cols=2, vgap=3, hgap=6)
         grid.AddGrowableCol(1)
 
-        def add_field(label_text: str, name: str) -> wx.TextCtrl:
-            # StaticText VOR TextCtrl → AT liest sie als Beschriftung
-            lbl = wx.StaticText(self, label=label_text, size=(70, -1),
-                                style=wx.ALIGN_RIGHT | wx.ST_NO_AUTORESIZE)
-            ctrl = wx.TextCtrl(self, style=wx.TE_READONLY | wx.BORDER_SIMPLE)
-            ctrl.SetName(name)          # Name = Label-Text → NVDA/JAWS/Narrator
-            ctrl.SetToolTip(f"{label_text} (schreibgeschützt)")
-            grid.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
-            grid.Add(ctrl, 1, wx.EXPAND)
-            return ctrl
-
-        # Reihenfolge = Tab-Reihenfolge
-        self.txt_from    = add_field("Von:",     "Von")
-        self.txt_to      = add_field("An:",      "An")
-        self.txt_cc      = add_field("CC:",      "CC")
-        self.txt_subject = add_field("Betreff:", "Betreff")
-        self.txt_date    = add_field("Datum:",   "Datum")
-        self.txt_attach  = add_field("Anhang:",  "Anhang")
+        # Alle Header-Felder: Label ZUERST erzeugen, dann TextCtrl
+        self.txt_from    = self._make_field(grid, "Von:",     "Von")
+        self.txt_to      = self._make_field(grid, "An:",      "An")
+        self.txt_cc      = self._make_field(grid, "CC:",      "CC")
+        self.txt_subject = self._make_field(grid, "Betreff:", "Betreff")
+        self.txt_date    = self._make_field(grid, "Datum:",   "Datum")
+        self.txt_attach  = self._make_field(grid, "Anhang:",  "Anhang")
 
         outer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 4)
         outer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.ALL, 4)
 
-        # ---- Nachrichtentext ----
+        # Nachrichtentext-Label ZUERST
         lbl_body = wx.StaticText(self, label="Nachrichtentext:")
         outer.Add(lbl_body, 0, wx.LEFT | wx.BOTTOM, 4)
 
+        # Dann das multiline TextCtrl
         self.txt_body = wx.TextCtrl(
             self,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_AUTO_URL | wx.BORDER_SUNKEN
@@ -78,13 +68,62 @@ class MailPreviewPanel(wx.Panel):
 
         self.SetSizer(outer)
 
+        # Tab-Navigation für readonly Felder manuell sicherstellen
+        self._header_fields = [
+            self.txt_from, self.txt_to, self.txt_cc,
+            self.txt_subject, self.txt_date, self.txt_attach,
+            self.txt_body,
+        ]
+        for ctrl in self._header_fields:
+            ctrl.Bind(wx.EVT_KEY_DOWN, self._on_field_key)
+
+    def _make_field(self, grid, label_text: str, name: str) -> wx.TextCtrl:
+        """
+        Erzeugt ERST StaticText (niedrigerer HWND), DANN TextCtrl.
+        Windows UIA verknüpft so automatisch Label → Control.
+        """
+        # 1. Label zuerst
+        lbl = wx.StaticText(self, label=label_text, size=(70, -1),
+                            style=wx.ALIGN_RIGHT | wx.ST_NO_AUTORESIZE)
+        # 2. Control danach
+        ctrl = wx.TextCtrl(self, style=wx.TE_READONLY | wx.BORDER_SIMPLE)
+        ctrl.SetName(name)
+        ctrl.SetToolTip(f"{label_text} schreibgeschützt, Tab springt zum nächsten Feld")
+
+        grid.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(ctrl, 1, wx.EXPAND)
+        return ctrl
+
+    def _on_field_key(self, event: wx.KeyEvent):
+        """
+        Manuelle Tab-Navigation für readonly TextCtrl-Felder.
+        wx.TE_READONLY kann auf Windows den Tab-Stop entfernen.
+        """
+        key   = event.GetKeyCode()
+        shift = event.ShiftDown()
+
+        if key == wx.WXK_TAB:
+            focused = self.FindFocus()
+            fields  = self._header_fields
+            if focused in fields:
+                idx = fields.index(focused)
+                if shift:
+                    next_idx = (idx - 1) % len(fields)
+                else:
+                    next_idx = (idx + 1) % len(fields)
+                fields[next_idx].SetFocus()
+            else:
+                event.Skip()
+            return
+
+        event.Skip()
+
     # ------------------------------------------------------------------ #
-    #  Daten anzeigen                                                     #
+    #  Daten                                                              #
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def _s(value, default: str = "") -> str:
-        """None (SQLite NULL) → leerer String."""
         return default if value is None else str(value)
 
     def show_mail(self, mail: dict):
@@ -105,13 +144,13 @@ class MailPreviewPanel(wx.Panel):
         self.txt_body.SetValue(body)
         self.txt_body.SetInsertionPoint(0)
 
-        # Screenreader: aktuellen Betreff im Namen verankern
-        self.txt_subject.SetName(f"Betreff: {self._s(mail.get('subject'), 'kein Betreff')}")
+        self.txt_subject.SetName(
+            f"Betreff: {self._s(mail.get('subject'), 'kein Betreff')}"
+        )
 
     def clear(self):
         self._current_mail = None
-        for ctrl in (self.txt_from, self.txt_to, self.txt_cc,
-                     self.txt_subject, self.txt_date, self.txt_attach, self.txt_body):
+        for ctrl in self._header_fields:
             ctrl.SetValue("")
 
     @staticmethod
