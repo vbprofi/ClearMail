@@ -1,14 +1,16 @@
 """
 MailPreviewPanel – Mail-Vorschau (unten rechts)
 
-Screenreader-Optimierung:
-  1. StaticText-Label wird ZUERST erzeugt (niedrigerer HWND-Index)
-     → Windows AT-API (UIA/MSAA) verknüpft automatisch Label mit nachfolgendem Control
-  2. SetName() auf jedem TextCtrl = Label-Text (expliziter Fallback für NVDA/JAWS)
-  3. Tab-Stop für readonly TextCtrl: wx.TE_READONLY entfernt auf Windows den Tab-Stop!
-     Lösung: wx.WANTS_CHARS NICHT setzen, stattdessen nach dem Erzeugen
-     SetWindowStyleFlag mit dem Tab-Stop-Flag ergänzen (Windows: WS_TABSTOP = 0x00010000)
-     Portabler Workaround: EVT_KEY_DOWN abfangen und Tab manuell weiterleiten.
+Tab-Navigation:
+  EVT_CHAR_HOOK am Panel abfangen – dieser Event wird VOR der Control-internen
+  Verarbeitung ausgelöst und gilt für alle Child-Widgets. Damit funktioniert
+  Tab auch in wx.TE_MULTILINE (das Tab sonst als Einrückung verarbeitet) und
+  in wx.TE_READONLY (das auf Windows keinen Tab-Stop hat).
+
+Screenreader:
+  StaticText wird ZUERST erzeugt (niedrigerer HWND-Index) → Windows UIA
+  verknüpft Label automatisch mit nachfolgendem TextCtrl.
+  SetName() auf jedem TextCtrl = zusätzlicher Fallback für NVDA/JAWS.
 """
 
 import wx
@@ -30,7 +32,6 @@ class MailPreviewPanel(wx.Panel):
     def _build_ui(self):
         outer = wx.BoxSizer(wx.VERTICAL)
 
-        # Überschrift
         lbl_header = wx.StaticText(self, label="Mail-Vorschau")
         lbl_header.SetFont(lbl_header.GetFont().Bold())
         outer.Add(lbl_header, 0, wx.ALL, 4)
@@ -38,7 +39,7 @@ class MailPreviewPanel(wx.Panel):
         grid = wx.FlexGridSizer(cols=2, vgap=3, hgap=6)
         grid.AddGrowableCol(1)
 
-        # Alle Header-Felder: Label ZUERST erzeugen, dann TextCtrl
+        # Label ZUERST, dann TextCtrl (Windows HWND-Reihenfolge für AT)
         self.txt_from    = self._make_field(grid, "Von:",     "Von")
         self.txt_to      = self._make_field(grid, "An:",      "An")
         self.txt_cc      = self._make_field(grid, "CC:",      "CC")
@@ -49,75 +50,84 @@ class MailPreviewPanel(wx.Panel):
         outer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 4)
         outer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.ALL, 4)
 
-        # Nachrichtentext-Label ZUERST
         lbl_body = wx.StaticText(self, label="Nachrichtentext:")
         outer.Add(lbl_body, 0, wx.LEFT | wx.BOTTOM, 4)
 
-        # Dann das multiline TextCtrl
         self.txt_body = wx.TextCtrl(
             self,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_AUTO_URL | wx.BORDER_SUNKEN
         )
         self.txt_body.SetName(
-            "Nachrichtentext, schreibgeschützt. Shift+F6 wechselt den Bereich."
+            "Nachrichtentext, schreibgeschützt. Tab springt zu Von-Feld."
         )
-        mono = wx.Font(10, wx.FONTFAMILY_TELETYPE,
-                       wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        self.txt_body.SetFont(mono)
+        self.txt_body.SetFont(wx.Font(
+            10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
+        ))
         outer.Add(self.txt_body, 1, wx.EXPAND | wx.ALL, 4)
 
         self.SetSizer(outer)
 
-        # Tab-Navigation für readonly Felder manuell sicherstellen
-        self._header_fields = [
-            self.txt_from, self.txt_to, self.txt_cc,
-            self.txt_subject, self.txt_date, self.txt_attach,
-            self.txt_body,
+        # Reihenfolge der Tab-Navigation
+        self._tab_fields = [
+            self.txt_body,      # F6 setzt Fokus hierher → Tab geht zu txt_from
+            self.txt_from,
+            self.txt_to,
+            self.txt_cc,
+            self.txt_subject,
+            self.txt_date,
+            self.txt_attach,
         ]
-        for ctrl in self._header_fields:
-            ctrl.Bind(wx.EVT_KEY_DOWN, self._on_field_key)
+
+        # EVT_CHAR_HOOK am Panel: greift VOR jeder Control-internen Verarbeitung,
+        # also auch vor TE_MULTILINE-Tab-Einrückung und trotz fehlendem Tab-Stop
+        # bei TE_READONLY-Feldern auf Windows.
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
     def _make_field(self, grid, label_text: str, name: str) -> wx.TextCtrl:
-        """
-        Erzeugt ERST StaticText (niedrigerer HWND), DANN TextCtrl.
-        Windows UIA verknüpft so automatisch Label → Control.
-        """
-        # 1. Label zuerst
+        # 1. Label zuerst erzeugen (niedrigerer HWND-Index → Windows AT)
         lbl = wx.StaticText(self, label=label_text, size=(70, -1),
                             style=wx.ALIGN_RIGHT | wx.ST_NO_AUTORESIZE)
         # 2. Control danach
         ctrl = wx.TextCtrl(self, style=wx.TE_READONLY | wx.BORDER_SIMPLE)
         ctrl.SetName(name)
         ctrl.SetToolTip(f"{label_text} schreibgeschützt, Tab springt zum nächsten Feld")
-
         grid.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(ctrl, 1, wx.EXPAND)
         return ctrl
 
-    def _on_field_key(self, event: wx.KeyEvent):
-        """
-        Manuelle Tab-Navigation für readonly TextCtrl-Felder.
-        Verwendet GetEventObject() statt FindFocus() – zuverlässiger auf Windows.
-        """
-        key   = event.GetKeyCode()
-        shift = event.ShiftDown()
+    # ------------------------------------------------------------------ #
+    #  Tab-Navigation via EVT_CHAR_HOOK                                   #
+    # ------------------------------------------------------------------ #
 
-        if key == wx.WXK_TAB:
-            # GetEventObject() liefert immer das Control das den Event ausgelöst hat
-            source = event.GetEventObject()
-            fields = self._header_fields
-            if source in fields:
-                idx = fields.index(source)
-                if shift:
-                    next_idx = (idx - 1) % len(fields)
-                else:
-                    next_idx = (idx + 1) % len(fields)
-                fields[next_idx].SetFocus()
-            else:
-                event.Skip()
+    def _on_char_hook(self, event: wx.KeyEvent):
+        """
+        EVT_CHAR_HOOK wird am Panel ausgelöst BEVOR das fokussierte
+        Child-Widget den Event verarbeitet. Damit funktioniert Tab-Navigation
+        auch in TE_MULTILINE (verarbeitet Tab intern) und TE_READONLY
+        (kein Tab-Stop auf Windows).
+
+        Nur aktiv wenn der Fokus in einem unserer Felder liegt.
+        """
+        if event.GetKeyCode() != wx.WXK_TAB:
+            event.Skip()
             return
 
-        event.Skip()
+        # Welches unserer Felder hat den Fokus?
+        focused = self.FindFocus()
+        fields  = self._tab_fields
+
+        if focused not in fields:
+            # Fokus ist woanders (z.B. in einem anderen Panel) → normal weiter
+            event.Skip()
+            return
+
+        # Tab-Ziel berechnen
+        idx      = fields.index(focused)
+        shift    = event.ShiftDown()
+        next_idx = (idx - 1) % len(fields) if shift else (idx + 1) % len(fields)
+
+        fields[next_idx].SetFocus()
+        # NICHT event.Skip() → verhindert interne Tab-Verarbeitung des Controls
 
     # ------------------------------------------------------------------ #
     #  Daten                                                              #
@@ -151,7 +161,7 @@ class MailPreviewPanel(wx.Panel):
 
     def clear(self):
         self._current_mail = None
-        for ctrl in self._header_fields:
+        for ctrl in self._tab_fields:
             ctrl.SetValue("")
 
     @staticmethod
