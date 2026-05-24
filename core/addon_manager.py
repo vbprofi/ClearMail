@@ -57,6 +57,15 @@ class AddonBase:
         """
         return []
 
+    def get_folder_context_items(self, item_type: str, item_data: dict) -> list:
+        """
+        Gibt Kontextmenü-Einträge für den Ordnerbaum zurück.
+        item_type: 'folder' | 'mailbox' | None
+        item_data: dict mit den Ordner-/Postfach-Daten
+        Format: [{"label": str, "handler": callable(item, data), "enabled": bool}, ...]
+        """
+        return []
+
     def get_toolbar_items(self) -> list:
         """
         Gibt eine Liste von Symbolleistenschaltflächen zurück.
@@ -152,6 +161,21 @@ class AddonManager:
         items = []
         for addon in self._addons.values():
             items.extend(addon.get_menu_items())
+        return items
+
+    def get_folder_context_items(self, item_type: str, item_data: dict) -> list:
+        """
+        Sammelt Kontextmenü-Einträge von Addons für den Ordnerbaum.
+        Rückgabe: [{"label": str, "handler": callable, "enabled": bool}, ...]
+        """
+        items = []
+        for addon in self._addons.values():
+            try:
+                entries = addon.get_folder_context_items(item_type, item_data)
+                if entries:
+                    items.extend(entries)
+            except Exception as e:
+                print(f"Addon '{addon.NAME}' get_folder_context_items Fehler: {e}")
         return items
 
     def scan_addon_dir(self) -> List[str]:

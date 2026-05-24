@@ -174,8 +174,17 @@ class MainFrame(wx.Frame):
     # ------------------------------------------------------------------ #
 
     def _bind_events(self):
-        # Tastatur
-        self.Bind(wx.EVT_KEY_DOWN, self._on_key_down)
+        # F6 / Shift+F6 als AcceleratorTable – funktioniert auch wenn
+        # Child-Widgets den Focus haben und EVT_KEY_DOWN nicht weitergeben.
+        id_f6       = wx.NewIdRef()
+        id_shift_f6 = wx.NewIdRef()
+        accel = wx.AcceleratorTable([
+            (wx.ACCEL_NORMAL, wx.WXK_F6, id_f6),
+            (wx.ACCEL_SHIFT,  wx.WXK_F6, id_shift_f6),
+        ])
+        self.SetAcceleratorTable(accel)
+        self.Bind(wx.EVT_MENU, lambda e: self._focus_next_panel(), id=id_f6)
+        self.Bind(wx.EVT_MENU, lambda e: self._focus_prev_panel(), id=id_shift_f6)
 
         # Datei-Menü
         self.Bind(wx.EVT_MENU, self._on_new_mail,     self.mi_new_mail)
@@ -226,19 +235,6 @@ class MainFrame(wx.Frame):
     #  F6 / Shift+F6 – Fokusnavigation                                   #
     # ------------------------------------------------------------------ #
 
-    def _on_key_down(self, event: wx.KeyEvent):
-        key  = event.GetKeyCode()
-        ctrl = event.ControlDown()
-        shift = event.ShiftDown()
-
-        if key == wx.WXK_F6:
-            if shift:
-                self._focus_prev_panel()
-            else:
-                self._focus_next_panel()
-            return
-        event.Skip()
-
     _panels_order = ["folder", "list", "preview"]
 
     def _focus_next_panel(self):
@@ -253,15 +249,31 @@ class MainFrame(wx.Frame):
         idx     = (order.index(current) - 1) % len(order) if current in order else 0
         self._focus_panel(order[idx])
 
+    @staticmethod
+    def _is_child_of(child, ancestor) -> bool:
+        """
+        Prüft ob 'child' ein Nachfahre von 'ancestor' ist.
+        Kompatibel mit wxPython 4.0.x und 4.1+ (ersetzt IsAncestorOf).
+        """
+        try:
+            w = child
+            while w is not None:
+                if w is ancestor:
+                    return True
+                w = w.GetParent()
+        except RuntimeError:
+            pass  # C++-Objekt bereits zerstört
+        return False
+
     def _current_focus_panel(self) -> str:
         focused = self.FindFocus()
         if focused is None:
             return "folder"
-        if self.folder_panel.IsAncestorOf(focused) or focused == self.folder_panel.tree:
+        if self._is_child_of(focused, self.folder_panel):
             return "folder"
-        if self.mail_list_panel.IsAncestorOf(focused):
+        if self._is_child_of(focused, self.mail_list_panel):
             return "list"
-        if self.mail_preview_panel.IsAncestorOf(focused):
+        if self._is_child_of(focused, self.mail_preview_panel):
             return "preview"
         return "folder"
 
@@ -354,9 +366,18 @@ class MainFrame(wx.Frame):
                 self.folder_panel.refresh_folder_unread(self._selected_folder_id)
 
     def _on_mark(self, is_read: bool):
-        if self._selected_mail_id:
-            self.controller.mark_mail_read(self._selected_mail_id, is_read)
-            self.mail_list_panel.refresh_mail_read(self._selected_mail_id, force_read=is_read)
+        if not self._selected_mail_id:
+            return
+        mail = self.controller.get_mail(self._selected_mail_id) if is_read else None
+        # get_mail() markiert als gelesen – für "ungelesen" direkt setzen
+        self.controller.mark_mail_read(self._selected_mail_id, is_read)
+        # Ungelesen-Zähler in DB aktualisieren
+        if self._selected_folder_id:
+            self.controller.db.update_folder_unread(self._selected_folder_id)
+        self.mail_list_panel.refresh_mail_read(self._selected_mail_id, force_read=is_read)
+        # Ordner-Baum aktualisieren
+        if self._selected_folder_id:
+            self.folder_panel.refresh_folder_unread(self._selected_folder_id)
 
     def _on_flag(self, event):
         if self._selected_mail_id:
