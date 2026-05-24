@@ -1,0 +1,18 @@
+# MailClient – Python-Abhängigkeiten
+# Python 3.12.4
+
+# Pflicht
+wxPython>=4.2.0
+
+# Optional – für erweiterte IMAP-Unterstützung (empfohlen)
+# imapclient>=3.0.1
+
+# Optional – für OpenPGP-Unterstützung
+# python-gnupg>=0.5.2
+
+# Optional – für HTML-Mail-Darstellung in wxPython
+# wxPython enthält wx.html2 (WebView), keine extra Abhängigkeit nötig
+
+# Entwicklung / Tests
+# pytest>=8.0.0
+# pytest-wx>=0.1.0
