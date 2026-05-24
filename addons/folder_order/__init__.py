@@ -32,8 +32,8 @@ class Addon(AddonBase):
         if item_type not in ("folder", "mailbox") or not item_data:
             return []
         return [
-            {"label": "Position nach oben",  "handler": self._move_up,   "enabled": True},
-            {"label": "Position nach unten", "handler": self._move_down, "enabled": True},
+            {"label": "Nach oben verschieben",  "handler": self._move_up,   "enabled": True},
+            {"label": "Nach unten verschieben", "handler": self._move_down, "enabled": True},
         ]
 
     # ------------------------------------------------------------------ #
