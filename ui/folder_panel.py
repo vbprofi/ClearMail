@@ -52,7 +52,7 @@ class FolderPanel(wx.Panel):
     def _build_ui(self):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(self, label="Postfächer und Ordner")
+        lbl = wx.StaticText(self, label="Ordner")
         lbl.SetFont(lbl.GetFont().Bold())
         sizer.Add(lbl, 0, wx.ALL, 4)
 
