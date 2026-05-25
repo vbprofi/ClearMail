@@ -159,7 +159,7 @@ class MainFrame(wx.Frame):
         self.mail_list_panel.on_context_menu    = self._show_mail_context_menu
 
     def _set_initial_accessibility(self):
-        self.SetName("MailClient")
+        self.SetName(tr("app_title"))
         self.folder_panel.tree.SetName(tr("folder_mailboxes"))
 
     # ------------------------------------------------------------------ #
@@ -403,16 +403,13 @@ class MainFrame(wx.Frame):
         dlg = AddonManagerDialog(self, self.controller); dlg.ShowModal(); dlg.Destroy()
 
     def _on_addressbook(self, event):
-        # Prüfen ob Adressbuch-Addon geladen
         addons = self.controller.addon_mgr.get_loaded_addons()
         ab = addons.get("addressbook")
         if ab and hasattr(ab, "open_window"):
             ab.open_window(self)
         else:
             wx.MessageBox(
-                "Adressbuch-Addon nicht geladen.\n\n"
-                "Address book addon not loaded.\n\n"
-                "Addon: addons/addressbook/",
+                tr("addressbook_not_loaded"),
                 tr("hint_title"), wx.OK | wx.ICON_INFORMATION, self)
 
     def _on_about(self, event):

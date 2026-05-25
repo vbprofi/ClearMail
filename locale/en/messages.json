@@ -200,5 +200,17 @@
   "rename_folder_prompt": "New name:",
   "rename_mailbox_title": "Rename Mailbox",
   "rename_mailbox_prompt": "New display name:",
-  "lang_name": "English"
+  "lang_name": "English",
+  "settings_lang_restart": "The language change will take effect on next startup.",
+  "compose_re_prefix": "Re: ",
+  "compose_fwd_prefix": "Fwd: ",
+  "folder_tree_tooltip": "Mailboxes and folders, tree view. Arrow keys navigate, Enter opens/closes, Application key for context menu, F6 switches area.",
+  "mail_list_name": "Message list",
+  "mail_list_tooltip": "E-Mail list. Arrow keys navigate. Enter or Space opens. Del deletes. Application key for context menu. F6 switches area.",
+  "mail_list_count": "Message list, {count} message(s)",
+  "preview_body_tooltip": "Message text, read-only. Tab moves to From field.",
+  "addressbook_not_loaded": "Address book addon not loaded.\n\nAddon: addons/addressbook/",
+  "pgp_not_impl": "Not yet implemented.",
+  "pgp_not_impl_title": "Info",
+  "mail_list_header": "Messages"
 }

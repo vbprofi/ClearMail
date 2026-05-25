@@ -200,5 +200,17 @@
   "rename_folder_prompt": "Neuer Name:",
   "rename_mailbox_title": "Postfach umbenennen",
   "rename_mailbox_prompt": "Neuer Anzeigename:",
-  "lang_name": "Deutsch"
+  "lang_name": "Deutsch",
+  "settings_lang_restart": "Die Sprachänderung wird beim nächsten Programmstart wirksam.\nThe language change will take effect on next startup.",
+  "compose_re_prefix": "Re: ",
+  "compose_fwd_prefix": "Fwd: ",
+  "folder_tree_tooltip": "Postfächer und Ordner, Baumansicht. Pfeiltasten navigieren, Enter öffnet/schließt, Applikationstaste für Kontextmenü, F6 wechselt den Bereich.",
+  "mail_list_name": "Nachrichtenliste",
+  "mail_list_tooltip": "E-Mail-Liste. Pfeiltasten navigieren. Enter oder Leertaste öffnen. Entf löscht. Applikationstaste für Kontextmenü. F6 wechselt den Bereich.",
+  "mail_list_count": "Nachrichtenliste, {count} Nachricht(en)",
+  "preview_body_tooltip": "Nachrichtentext, schreibgeschützt. Tab springt zu Von-Feld.",
+  "addressbook_not_loaded": "Adressbuch-Addon nicht geladen.\n\nAddon: addons/addressbook/",
+  "pgp_not_impl": "Noch nicht implementiert.",
+  "pgp_not_impl_title": "Info",
+  "mail_list_header": "Nachrichten"
 }

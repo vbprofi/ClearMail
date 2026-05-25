@@ -1,12 +1,12 @@
 """
 FolderPanel – Linke Seite: Baumstruktur der Postfächer und Ordner.
-i18n-fähig, Papierkorb-Unterstützung.
+Vollständig i18n-fähig. Papierkorb-Unterstützung.
 """
 
 import wx
 from core.i18n import tr
 
-# Ordner-Icon-Index
+
 ICON_MAILBOX  = 0
 ICON_INBOX    = 1
 ICON_SENT     = 2
@@ -28,15 +28,14 @@ FOLDER_TYPE_ICONS = {
 
 
 class FolderPanel(wx.Panel):
-    """Panel mit Postfach-/Ordner-Baumstruktur und vollständigem Kontextmenü."""
 
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        self.on_folder_selected = None   # callback(folder_id, folder_name)
+        self.on_folder_selected = None
 
-        self._folder_map  = {}   # TreeItemId -> folder dict
-        self._mailbox_map = {}   # TreeItemId -> mailbox dict
+        self._folder_map  = {}
+        self._mailbox_map = {}
 
         self._build_ui()
         self._build_image_list()
@@ -50,47 +49,37 @@ class FolderPanel(wx.Panel):
     def _build_ui(self):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(self, label="Ordner")
+        lbl = wx.StaticText(self, label=tr("folder_mailboxes"))
         lbl.SetFont(lbl.GetFont().Bold())
         sizer.Add(lbl, 0, wx.ALL, 4)
 
         self.tree = wx.TreeCtrl(
             self,
-            style=(
-                wx.TR_HAS_BUTTONS |
-                wx.TR_LINES_AT_ROOT |
-                wx.TR_HIDE_ROOT |
-                wx.TR_SINGLE |
-                wx.BORDER_SUNKEN
-            )
+            style=(wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT |
+                   wx.TR_HIDE_ROOT | wx.TR_SINGLE | wx.BORDER_SUNKEN)
         )
-        self.tree.SetName(
-            "Postfächer und Ordner, Baumansicht. "
-            "Pfeiltasten navigieren, Enter öffnet/schließt, "
-            "Applikationstaste oder Shift+F10 für Kontextmenü, "
-            "F6 wechselt den Bereich."
-        )
+        self.tree.SetName(tr("folder_mailboxes"))
+        self.tree.SetToolTip(tr("folder_tree_tooltip"))
         sizer.Add(self.tree, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 4)
         self.SetSizer(sizer)
 
     def _build_image_list(self):
-        il = wx.ImageList(16, 16, True)
+        il  = wx.ImageList(16, 16, True)
         art = wx.ArtProvider
-        il.Add(art.GetBitmap(wx.ART_FOLDER,      wx.ART_OTHER, (16, 16)))  # 0 mailbox
-        il.Add(art.GetBitmap(wx.ART_GO_DOWN,     wx.ART_OTHER, (16, 16)))  # 1 inbox
-        il.Add(art.GetBitmap(wx.ART_GO_UP,       wx.ART_OTHER, (16, 16)))  # 2 sent
-        il.Add(art.GetBitmap(wx.ART_NEW,         wx.ART_OTHER, (16, 16)))  # 3 drafts
-        il.Add(art.GetBitmap(wx.ART_DELETE,      wx.ART_OTHER, (16, 16)))  # 4 trash
-        il.Add(art.GetBitmap(wx.ART_WARNING,     wx.ART_OTHER, (16, 16)))  # 5 spam
-        il.Add(art.GetBitmap(wx.ART_FOLDER_OPEN, wx.ART_OTHER, (16, 16)))  # 6 archive
-        il.Add(art.GetBitmap(wx.ART_FOLDER,      wx.ART_OTHER, (16, 16)))  # 7 custom
+        il.Add(art.GetBitmap(wx.ART_FOLDER,      wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_GO_DOWN,     wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_GO_UP,       wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_NEW,         wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_DELETE,      wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_WARNING,     wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_FOLDER_OPEN, wx.ART_OTHER, (16, 16)))
+        il.Add(art.GetBitmap(wx.ART_FOLDER,      wx.ART_OTHER, (16, 16)))
         self.tree.SetImageList(il)
         self._image_list = il
 
     def _bind_events(self):
-        self.tree.Bind(wx.EVT_TREE_SEL_CHANGED,    self._on_selection_changed)
-        self.tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self._on_item_activated)
-        # Kontextmenü: rechte Maustaste UND Applikationstaste (Shift+F10)
+        self.tree.Bind(wx.EVT_TREE_SEL_CHANGED,     self._on_selection_changed)
+        self.tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED,  self._on_item_activated)
         self.tree.Bind(wx.EVT_TREE_ITEM_RIGHT_CLICK, self._on_item_right_click)
         self.tree.Bind(wx.EVT_CONTEXT_MENU,          self._on_context_menu_key)
 
@@ -116,7 +105,7 @@ class FolderPanel(wx.Panel):
             self._add_folder_items(mb_item, folders, parent_id=None)
             self.tree.Expand(mb_item)
 
-    def _add_folder_items(self, parent_item, folders: list, parent_id):
+    def _add_folder_items(self, parent_item, folders, parent_id):
         for f in folders:
             if f["parent_id"] != parent_id:
                 continue
@@ -142,8 +131,8 @@ class FolderPanel(wx.Panel):
                 return
             data = self.tree.GetItemData(item)
             if data and data[0] == "folder":
-                folder_id   = data[1]
                 f           = self._folder_map.get(item, {})
+                folder_id   = data[1]
                 folder_name = f.get("name", "")
                 mailbox_id  = f.get("mailbox_id")
                 if self.on_folder_selected:
@@ -165,14 +154,12 @@ class FolderPanel(wx.Panel):
             pass
 
     def _on_item_right_click(self, event):
-        """Rechte Maustaste: Item selektieren, dann Menü zeigen."""
         item = event.GetItem()
         if item.IsOk():
             self.tree.SelectItem(item)
         self._show_context_menu(item)
 
     def _on_context_menu_key(self, event):
-        """Applikationstaste / Shift+F10: Menü für aktuell selektiertes Item."""
         item = self.tree.GetSelection()
         self._show_context_menu(item if item.IsOk() else None)
 
@@ -181,11 +168,10 @@ class FolderPanel(wx.Panel):
     # ------------------------------------------------------------------ #
 
     def _show_context_menu(self, item):
-        """Zeigt das Kontextmenü je nach Item-Typ (Postfach / Ordner)."""
         menu = wx.Menu()
 
         if item and item.IsOk():
-            data = self.tree.GetItemData(item)
+            data      = self.tree.GetItemData(item)
             node_type = data[0] if data else None
         else:
             node_type = None
@@ -195,9 +181,9 @@ class FolderPanel(wx.Panel):
         elif node_type == "folder":
             self._build_folder_menu(menu, item)
         else:
-            menu.Append(wx.ID_ANY, "(Kein Element ausgewählt)").Enable(False)
+            menu.Append(wx.ID_ANY, tr("hint_title")).Enable(False)
 
-        # ---- Addon-Erweiterungen ----
+        # Addon-Erweiterungen
         addon_items = self.controller.addon_mgr.get_folder_context_items(
             item_type=node_type,
             item_data=self._get_item_data_dict(item),
@@ -218,25 +204,21 @@ class FolderPanel(wx.Panel):
         self.tree.PopupMenu(menu)
         menu.Destroy()
 
-    def _build_mailbox_menu(self, menu: wx.Menu, item):
-        """Menüeinträge für ein Postfach."""
-        mi_new_folder = menu.Append(wx.ID_ANY, "Neuen Ordner erstellen...")
-        mi_sep        = menu.AppendSeparator()
-        mi_rename     = menu.Append(wx.ID_ANY, "Postfach umbenennen...")
-        mi_remove     = menu.Append(wx.ID_ANY, "Postfach entfernen")
-
-        self.Bind(wx.EVT_MENU, lambda e: self._on_new_folder(item),    mi_new_folder)
+    def _build_mailbox_menu(self, menu, item):
+        mi_new    = menu.Append(wx.ID_ANY, tr("ctx_folder_new"))
+        mi_rename = menu.Append(wx.ID_ANY, tr("ctx_mailbox_rename"))
+        mi_remove = menu.Append(wx.ID_ANY, tr("ctx_mailbox_remove"))
+        self.Bind(wx.EVT_MENU, lambda e: self._on_new_folder(item),    mi_new)
         self.Bind(wx.EVT_MENU, lambda e: self._on_rename_mailbox(item), mi_rename)
         self.Bind(wx.EVT_MENU, lambda e: self._on_remove_mailbox(item), mi_remove)
 
-    def _build_folder_menu(self, menu: wx.Menu, item):
-        """Menüeinträge für einen Ordner."""
-        f = self._folder_map.get(item, {})
+    def _build_folder_menu(self, menu, item):
+        f         = self._folder_map.get(item, {})
         is_system = f.get("folder_type", "custom") != "custom"
 
-        mi_new_sub = menu.Append(wx.ID_ANY, "Neuen Unterordner erstellen...")
-        mi_rename  = menu.Append(wx.ID_ANY, "Ordner umbenennen...")
-        mi_delete  = menu.Append(wx.ID_ANY, "Ordner löschen")
+        mi_new_sub = menu.Append(wx.ID_ANY, tr("ctx_folder_new_sub"))
+        mi_rename  = menu.Append(wx.ID_ANY, tr("ctx_folder_rename"))
+        mi_delete  = menu.Append(wx.ID_ANY, tr("ctx_folder_delete"))
 
         if is_system:
             mi_rename.Enable(False)
@@ -251,12 +233,11 @@ class FolderPanel(wx.Panel):
     # ------------------------------------------------------------------ #
 
     def _on_new_folder(self, parent_item):
-        """Neuen Ordner unter einem Postfach anlegen."""
         mb = self._mailbox_map.get(parent_item)
         if not mb:
             return
         name = wx.GetTextFromUser(
-            "Name des neuen Ordners:", "Neuer Ordner", parent=self
+            tr("new_folder_prompt"), tr("new_folder_title"), parent=self
         ).strip()
         if not name:
             return
@@ -269,12 +250,11 @@ class FolderPanel(wx.Panel):
         self.reload()
 
     def _on_new_subfolder(self, parent_item):
-        """Neuen Unterordner unter einem Ordner anlegen."""
         f = self._folder_map.get(parent_item)
         if not f:
             return
         name = wx.GetTextFromUser(
-            "Name des Unterordners:", "Neuer Unterordner", parent=self
+            tr("new_subfolder_prompt"), tr("new_subfolder_title"), parent=self
         ).strip()
         if not name:
             return
@@ -291,7 +271,7 @@ class FolderPanel(wx.Panel):
         if not f:
             return
         new_name = wx.GetTextFromUser(
-            "Neuer Name:", "Ordner umbenennen",
+            tr("rename_folder_prompt"), tr("rename_folder_title"),
             default_value=f["name"], parent=self
         ).strip()
         if not new_name or new_name == f["name"]:
@@ -325,7 +305,7 @@ class FolderPanel(wx.Panel):
         if not mb:
             return
         new_name = wx.GetTextFromUser(
-            "Neuer Anzeigename:", "Postfach umbenennen",
+            tr("rename_mailbox_prompt"), tr("rename_mailbox_title"),
             default_value=mb["name"], parent=self
         ).strip()
         if not new_name or new_name == mb["name"]:
@@ -345,13 +325,12 @@ class FolderPanel(wx.Panel):
                          wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
             return
         conn = self.controller.db._get_mailstore_conn()
-        # Mails → Ordner → Postfach löschen
         conn.execute(
             "DELETE FROM mails WHERE folder_id IN "
             "(SELECT id FROM folders WHERE mailbox_id = ?)", (mb["id"],)
         )
-        conn.execute("DELETE FROM folders WHERE mailbox_id = ?",  (mb["id"],))
-        conn.execute("DELETE FROM mailboxes WHERE id = ?",        (mb["id"],))
+        conn.execute("DELETE FROM folders   WHERE mailbox_id = ?", (mb["id"],))
+        conn.execute("DELETE FROM mailboxes WHERE id = ?",         (mb["id"],))
         conn.commit()
         self.reload()
 
@@ -360,7 +339,6 @@ class FolderPanel(wx.Panel):
     # ------------------------------------------------------------------ #
 
     def _get_item_data_dict(self, item) -> dict:
-        """Gibt das Daten-Dictionary für ein Tree-Item zurück."""
         if item is None or not item.IsOk():
             return {}
         data = self.tree.GetItemData(item)
@@ -373,7 +351,6 @@ class FolderPanel(wx.Panel):
         return {}
 
     def refresh_folder_unread(self, folder_id: int):
-        """Aktualisiert den Ungelesen-Zähler eines Ordners im Baum."""
         for item, f in self._folder_map.items():
             if f["id"] != folder_id:
                 continue
@@ -395,7 +372,6 @@ class FolderPanel(wx.Panel):
         return ""
 
     def get_selected_item_type(self):
-        """Gibt ('folder'|'mailbox', id) des selektierten Items zurück."""
         item = self.tree.GetSelection()
         if item.IsOk():
             return self.tree.GetItemData(item)

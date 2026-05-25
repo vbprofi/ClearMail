@@ -266,8 +266,7 @@ class SettingsDialog(wx.Dialog):
             s("language", new_lang)
             if new_lang != old_lang:
                 wx.MessageBox(
-                    "Die Sprachänderung wird beim nächsten Programmstart wirksam.\n"
-                    "The language change will take effect on next startup.",
+                    tr("settings_lang_restart"),
                     tr("hint_title"), wx.OK | wx.ICON_INFORMATION, self)
         self.EndModal(wx.ID_OK)
 
@@ -341,7 +340,8 @@ class PGPDialog(wx.Dialog):
         row = wx.BoxSizer(wx.HORIZONTAL)
         for lbl in (tr("pgp_import"), tr("pgp_export")):
             b = wx.Button(panel, label=lbl)
-            b.Bind(wx.EVT_BUTTON, lambda e: wx.MessageBox("Not implemented.", "Info", wx.OK, self))
+            b.Bind(wx.EVT_BUTTON, lambda e: wx.MessageBox(
+                tr("pgp_not_impl"), tr("pgp_not_impl_title"), wx.OK, self))
             row.Add(b, 0, wx.RIGHT, 6)
         row.AddStretchSpacer()
         btn_close = wx.Button(panel, wx.ID_CLOSE, tr("dlg_close"))
@@ -562,23 +562,27 @@ class ComposeDialog(wx.Dialog):
         self.txt_to.SetFocus()
 
     def _prefill(self, reply_to, reply_all, forward):
+        re_prefix  = tr("compose_re_prefix")
+        fwd_prefix = tr("compose_fwd_prefix")
         if reply_to:
             self.txt_to.SetValue(str(reply_to.get("sender") or ""))
             if reply_all:
                 self.txt_cc.SetValue(str(reply_to.get("recipients") or ""))
             subj = str(reply_to.get("subject") or "")
-            self.txt_subject.SetValue(subj if subj.startswith("Re:") else "Re: " + subj)
+            self.txt_subject.SetValue(subj if subj.startswith(re_prefix) else re_prefix + subj)
             self.txt_body.SetValue(
                 f"\n\n──────────────────\n"
-                f"{tr('preview_from')} {reply_to.get('sender_name','')} <{reply_to.get('sender','')}>\n"
+                f"{tr('preview_from')} {reply_to.get('sender_name','')}"
+                f" <{reply_to.get('sender','')}>\n"
                 f"{reply_to.get('body_text','') or ''}")
             self.txt_body.SetInsertionPoint(0)
         elif forward:
             subj = str(forward.get("subject") or "")
-            self.txt_subject.SetValue(subj if subj.startswith("Fwd:") else "Fwd: " + subj)
+            self.txt_subject.SetValue(subj if subj.startswith(fwd_prefix) else fwd_prefix + subj)
             self.txt_body.SetValue(
                 f"\n\n──────────────────\n"
-                f"{tr('preview_from')} {forward.get('sender_name','')} <{forward.get('sender','')}>\n"
+                f"{tr('preview_from')} {forward.get('sender_name','')}"
+                f" <{forward.get('sender','')}>\n"
                 f"{forward.get('body_text','') or ''}")
 
     def _on_send(self, event):
