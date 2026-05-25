@@ -1,0 +1,11 @@
+{
+  "lang_name": "Deutsch",
+  "fo_description": "Ordner und Postfächer per Kontextmenü sortieren",
+  "fo_move_up": "Nach oben verschieben",
+  "fo_move_down": "Nach unten verschieben",
+  "fo_already_top": "Das Element befindet sich bereits ganz oben.",
+  "fo_already_bottom": "Das Element befindet sich bereits ganz unten.",
+  "fo_title": "Position ändern",
+  "fo_not_found": "Element nicht in der Geschwisterliste gefunden.\nBitte die Anwendung neu starten.",
+  "fo_error_title": "Fehler"
+}

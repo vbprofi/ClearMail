@@ -1,24 +1,27 @@
 """
-Beispiel-Addon: MailLogger
+Addon: MailLogger
 Protokolliert alle Mail-Events in eine Logdatei.
 
-Installation:
-  1. Dieses Verzeichnis nach ~/.mailclient/addons/mail_logger/ kopieren
-  2. MailClient neu starten
-  3. Das Addon erscheint in Extras → Addon-Verwaltung
+Sprachdateien: locale/de/messages.json, locale/en/messages.json
 """
 
 import os
+import subprocess
+import sys
 from datetime import datetime
 from core.addon_manager import AddonBase
+from core.i18n import tr
 
 
 class Addon(AddonBase):
-    """Beispiel-Addon: Protokolliert Mail-Events."""
 
-    NAME        = "MailLogger"
-    VERSION     = "1.0.0"
-    DESCRIPTION = "Protokolliert Mail-Events in eine Logdatei"
+    NAME    = "MailLogger"
+    VERSION = "1.1.0"
+
+    # DESCRIPTION wird aus Sprachdatei geladen (nach on_load)
+    @property
+    def DESCRIPTION(self):
+        return tr("ml_description")
 
     def __init__(self, controller):
         super().__init__(controller)
@@ -27,30 +30,29 @@ class Addon(AddonBase):
         )
 
     def on_load(self):
-        self._log("Addon geladen")
+        self._log(tr("ml_log_loaded"))
 
     def on_unload(self):
-        self._log("Addon entladen")
+        self._log(tr("ml_log_unloaded"))
 
     def on_mail_read(self, data: dict):
-        self._log(f"Mail gelesen: id={data.get('mail_id')}")
+        self._log(tr("ml_log_mail_read", mail_id=data.get("mail_id", "?")))
 
     def on_mail_deleted(self, data: dict):
-        self._log(f"Mail gelöscht: id={data.get('mail_id')}")
+        self._log(tr("ml_log_mail_deleted", mail_id=data.get("mail_id", "?")))
 
     def on_mail_moved(self, data: dict):
-        self._log(f"Mail verschoben: id={data.get('mail_id')} → folder={data.get('folder_id')}")
+        self._log(tr("ml_log_mail_moved",
+                     mail_id=data.get("mail_id", "?"),
+                     folder_id=data.get("folder_id", "?")))
 
     def get_menu_items(self) -> list:
-        return [
-            {
-                "label":   "Logdatei öffnen (MailLogger)",
-                "handler": self._open_log,
-            }
-        ]
+        return [{
+            "label":   tr("ml_menu_open_log"),
+            "handler": self._open_log,
+        }]
 
     def _open_log(self, mail_id=None):
-        import subprocess, sys
         if os.path.exists(self._log_path):
             if sys.platform == "win32":
                 os.startfile(self._log_path)

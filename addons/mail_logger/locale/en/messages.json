@@ -1,0 +1,10 @@
+{
+  "lang_name": "English",
+  "ml_description": "Logs mail events to a log file",
+  "ml_menu_open_log": "Open log file (MailLogger)",
+  "ml_log_loaded": "Addon loaded",
+  "ml_log_unloaded": "Addon unloaded",
+  "ml_log_mail_read": "Mail read: id={mail_id}",
+  "ml_log_mail_deleted": "Mail deleted: id={mail_id}",
+  "ml_log_mail_moved": "Mail moved: id={mail_id} → folder={folder_id}"
+}

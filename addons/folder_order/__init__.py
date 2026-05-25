@@ -1,25 +1,25 @@
 """
 Addon: FolderOrder
 Erweitert das Kontextmenü der Ordnerbaumstruktur um:
-  • "Position nach oben"   – verschiebt Element eine Stufe höher
-  • "Position nach unten"  – verschiebt Element eine Stufe tiefer
+  • "Nach oben verschieben"  – verschiebt Element eine Stufe höher
+  • "Nach unten verschieben" – verschiebt Element eine Stufe tiefer
 
-Unterscheidet korrekt zwischen Postfächern (mailboxes-Tabelle)
-und Ordnern (folders-Tabelle).
-
-Die Sortierung wird über eine 'sort_order'-Spalte in der DB gespeichert,
-die beim ersten Addon-Load automatisch angelegt wird.
+Sprachdateien: locale/de/messages.json, locale/en/messages.json
 """
 
 import wx
 from core.addon_manager import AddonBase
+from core.i18n import tr
 
 
 class Addon(AddonBase):
 
-    NAME        = "FolderOrder"
-    VERSION     = "1.1.0"
-    DESCRIPTION = "Ordner und Postfächer per Kontextmenü sortieren"
+    NAME    = "FolderOrder"
+    VERSION = "1.2.0"
+
+    @property
+    def DESCRIPTION(self):
+        return tr("fo_description")
 
     def on_load(self):
         self._ensure_sort_columns()
@@ -32,8 +32,8 @@ class Addon(AddonBase):
         if item_type not in ("folder", "mailbox") or not item_data:
             return []
         return [
-            {"label": "Nach oben verschieben",  "handler": self._move_up,   "enabled": True},
-            {"label": "Nach unten verschieben", "handler": self._move_down, "enabled": True},
+            {"label": tr("fo_move_up"),   "handler": self._move_up,   "enabled": True},
+            {"label": tr("fo_move_down"), "handler": self._move_down, "enabled": True},
         ]
 
     # ------------------------------------------------------------------ #
@@ -47,32 +47,24 @@ class Addon(AddonBase):
         self._move(item_data, direction=+1)
 
     def _move(self, item_data: dict, direction: int):
-        """
-        Tauscht sort_order mit dem Nachbar-Element.
-
-        Postfach  → Tabelle mailboxes, Geschwister = alle Postfächer
-        Ordner    → Tabelle folders,   Geschwister = Ordner mit gleichem
-                    mailbox_id UND parent_id
-        """
-        self._ensure_sort_columns()   # Spalte sicher vorhanden
+        self._ensure_sort_columns()
 
         conn    = self.controller.db._get_mailstore_conn()
         item_id = item_data.get("id")
         if not item_id:
             return
 
-        # ---- Postfach ------------------------------------------------
+        # Postfach (hat account_id, kein mailbox_id)
         if "account_id" in item_data:
-            # Postfach-Datensatz: hat account_id, kein mailbox_id
             siblings = conn.execute(
                 "SELECT id, sort_order FROM mailboxes ORDER BY sort_order, id"
             ).fetchall()
             table = "mailboxes"
 
-        # ---- Ordner --------------------------------------------------
+        # Ordner (hat mailbox_id)
         elif "mailbox_id" in item_data:
             mailbox_id = item_data["mailbox_id"]
-            parent_id  = item_data.get("parent_id")   # None = Wurzel-Ordner
+            parent_id  = item_data.get("parent_id")
 
             if parent_id is None:
                 siblings = conn.execute(
@@ -91,15 +83,13 @@ class Addon(AddonBase):
             table = "folders"
 
         else:
-            return  # Unbekannter Typ
+            return
 
-        # ---- Position im Geschwister-Array finden --------------------
         ids = [row[0] for row in siblings]
         if item_id not in ids:
             wx.MessageBox(
-                "Element nicht in der Geschwisterliste gefunden.\n"
-                "Bitte die Anwendung neu starten.",
-                "Fehler", wx.OK | wx.ICON_ERROR
+                tr("fo_not_found"),
+                tr("fo_error_title"), wx.OK | wx.ICON_ERROR
             )
             return
 
@@ -107,22 +97,17 @@ class Addon(AddonBase):
         swap_pos = pos + direction
 
         if swap_pos < 0 or swap_pos >= len(ids):
-            msg = "ganz oben" if direction == -1 else "ganz unten"
-            wx.MessageBox(
-                f"Das Element befindet sich bereits {msg}.",
-                "Position ändern", wx.OK | wx.ICON_INFORMATION
-            )
+            msg = tr("fo_already_top") if direction == -1 else tr("fo_already_bottom")
+            wx.MessageBox(msg, tr("fo_title"), wx.OK | wx.ICON_INFORMATION)
             return
 
-        # ---- sort_order-Werte sicherstellen (keine Duplikate) --------
-        # Immer neu sequenziell vergeben → robust gegen NULL-Werte
+        # Sequenzielle sort_order-Werte vergeben (verhindert Duplikate/NULL)
         for i, (sid, _) in enumerate(siblings):
             conn.execute(
                 f"UPDATE {table} SET sort_order = ? WHERE id = ?",
                 (i * 10, sid)
             )
 
-        # Jetzt tauschen: pos*10 ↔ swap_pos*10
         order_a = pos      * 10
         order_b = swap_pos * 10
 
@@ -136,7 +121,6 @@ class Addon(AddonBase):
         )
         conn.commit()
 
-        # ---- Baum neu laden ------------------------------------------
         panel = self._find_folder_panel()
         if panel:
             panel.reload()
@@ -146,7 +130,6 @@ class Addon(AddonBase):
     # ------------------------------------------------------------------ #
 
     def _ensure_sort_columns(self):
-        """Legt sort_order-Spalte an falls nicht vorhanden und befüllt sie."""
         conn = self.controller.db._get_mailstore_conn()
         for table in ("mailboxes", "folders"):
             cols = [r[1] for r in conn.execute(
