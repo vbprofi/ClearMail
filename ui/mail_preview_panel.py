@@ -1,3 +1,4 @@
+from core.i18n import tr
 """
 MailPreviewPanel – Mail-Vorschau (unten rechts)
 
@@ -32,7 +33,7 @@ class MailPreviewPanel(wx.Panel):
     def _build_ui(self):
         outer = wx.BoxSizer(wx.VERTICAL)
 
-        lbl_header = wx.StaticText(self, label="Mail-Vorschau")
+        lbl_header = wx.StaticText(self, label=tr("preview_header"))
         lbl_header.SetFont(lbl_header.GetFont().Bold())
         outer.Add(lbl_header, 0, wx.ALL, 4)
 
@@ -40,17 +41,17 @@ class MailPreviewPanel(wx.Panel):
         grid.AddGrowableCol(1)
 
         # Label ZUERST, dann TextCtrl (Windows HWND-Reihenfolge für AT)
-        self.txt_from    = self._make_field(grid, "Von:",     "Von")
-        self.txt_to      = self._make_field(grid, "An:",      "An")
-        self.txt_cc      = self._make_field(grid, "CC:",      "CC")
-        self.txt_subject = self._make_field(grid, "Betreff:", "Betreff")
-        self.txt_date    = self._make_field(grid, "Datum:",   "Datum")
-        self.txt_attach  = self._make_field(grid, "Anhang:",  "Anhang")
+        self.txt_from    = self._make_field(grid, tr("preview_from"),     "Von")
+        self.txt_to      = self._make_field(grid, tr("preview_to"),      "An")
+        self.txt_cc      = self._make_field(grid, tr("preview_cc"),      "CC")
+        self.txt_subject = self._make_field(grid, tr("preview_subject"), "Betreff")
+        self.txt_date    = self._make_field(grid, tr("preview_date"),   "Datum")
+        self.txt_attach  = self._make_field(grid, tr("preview_attach"),  "Anhang")
 
         outer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 4)
         outer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.ALL, 4)
 
-        lbl_body = wx.StaticText(self, label="Nachrichtentext:")
+        lbl_body = wx.StaticText(self, label=tr("preview_body"))
         outer.Add(lbl_body, 0, wx.LEFT | wx.BOTTOM, 4)
 
         self.txt_body = wx.TextCtrl(
@@ -147,9 +148,9 @@ class MailPreviewPanel(wx.Panel):
         self.txt_from.SetValue(from_str)
         self.txt_to.SetValue(self._s(mail.get("recipients")))
         self.txt_cc.SetValue(self._s(mail.get("cc")))
-        self.txt_subject.SetValue(self._s(mail.get("subject"), "(kein Betreff)"))
+        self.txt_subject.SetValue(self._s(mail.get("subject"), tr("preview_no_subject")))
         self.txt_date.SetValue(self._format_date(self._s(mail.get("date"))))
-        self.txt_attach.SetValue("Ja" if mail.get("has_attach") else "Nein")
+        self.txt_attach.SetValue(tr("preview_attach_yes") if mail.get("has_attach") else tr("preview_attach_no"))
 
         body = self._s(mail.get("body_text")) or self._s(mail.get("body_html"))
         self.txt_body.SetValue(body)

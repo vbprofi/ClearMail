@@ -1,3 +1,4 @@
+from core.i18n import tr
 """
 MailListPanel – Obere rechte Seite: Liste der E-Mails eines Ordners
 Screenreader-optimiert: Spaltenüberschriften, Tastennavigation
@@ -39,7 +40,7 @@ class MailListPanel(wx.Panel):
     def _build_ui(self):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        lbl = wx.StaticText(self, label="Nachrichten")
+        lbl = wx.StaticText(self, label=tr("folder_inbox"))
         lbl.SetFont(lbl.GetFont().Bold())
         sizer.Add(lbl, 0, wx.ALL, 4)
 
@@ -55,12 +56,12 @@ class MailListPanel(wx.Panel):
             "F6 wechselt den Bereich."
         )
 
-        self.list_ctrl.InsertColumn(COL_FLAG,    "!",       width=24)
-        self.list_ctrl.InsertColumn(COL_READ,    "Status",  width=60)
-        self.list_ctrl.InsertColumn(COL_FROM,    "Von",     width=180)
-        self.list_ctrl.InsertColumn(COL_SUBJECT, "Betreff", width=300)
-        self.list_ctrl.InsertColumn(COL_DATE,    "Datum",   width=130)
-        self.list_ctrl.InsertColumn(COL_SIZE,    "Größe",   width=70)
+        self.list_ctrl.InsertColumn(COL_FLAG,    tr("mail_list_flag"),       width=24)
+        self.list_ctrl.InsertColumn(COL_READ,    tr("mail_list_status"),  width=60)
+        self.list_ctrl.InsertColumn(COL_FROM,    tr("mail_list_from"),     width=180)
+        self.list_ctrl.InsertColumn(COL_SUBJECT, tr("mail_list_subject"), width=300)
+        self.list_ctrl.InsertColumn(COL_DATE,    tr("mail_list_date"),   width=130)
+        self.list_ctrl.InsertColumn(COL_SIZE,    tr("mail_list_size"),   width=70)
 
         sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 4)
         self.SetSizer(sizer)
@@ -86,7 +87,7 @@ class MailListPanel(wx.Panel):
             idx = self.list_ctrl.InsertItem(row, flag_str)
 
             # Status
-            status = "Ungelesen" if not mail.get("is_read") else "Gelesen"
+            status = tr("mail_status_unread") if not mail.get("is_read") else tr("mail_status_read")
             self.list_ctrl.SetItem(idx, COL_READ, status)
 
             # Absender – None-sicher
@@ -163,7 +164,7 @@ class MailListPanel(wx.Panel):
             if mail["id"] == mail_id:
                 is_read = force_read if force_read is not None else True
                 mail["is_read"] = is_read
-                status = "Gelesen" if is_read else "Ungelesen"
+                status = tr("mail_status_read") if is_read else tr("mail_status_unread")
                 self.list_ctrl.SetItem(idx, COL_READ, status)
                 # Fett entfernen/setzen
                 font = self.list_ctrl.GetFont()

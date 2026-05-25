@@ -7,10 +7,10 @@ import wx
 import sys
 import os
 
-# Projektpfad zum sys.path hinzufügen
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
+from core.i18n import set_language, load_addon_translations
 from database.db_manager import DatabaseManager
 from ui.main_frame import MainFrame
 from core.app_controller import AppController
@@ -20,11 +20,13 @@ from core.addon_manager import AddonManager
 class MailClientApp(wx.App):
 
     def OnInit(self):
-        # Datenbank initialisieren
         self.db_manager = DatabaseManager()
         self.db_manager.initialize()
 
-        # Addon-Manager: scannt <app>/addons/ UND ~/.mailclient/addons/
+        # Sprache aus Einstellungen laden
+        lang = self.db_manager.get_setting("language", "de")
+        set_language(lang)
+
         app_addon_dir  = os.path.join(BASE_DIR, "addons")
         user_addon_dir = os.path.join(os.path.expanduser("~"), ".mailclient", "addons")
         self.addon_manager = AddonManager(
@@ -32,13 +34,11 @@ class MailClientApp(wx.App):
             user_dir=user_addon_dir
         )
 
-        # Controller initialisieren (wird vor load_all benötigt)
         self.controller = AppController(self.db_manager, self.addon_manager)
 
-        # Alle verfügbaren Addons automatisch laden
-        self.addon_manager.load_all(self.controller)
+        # Addons laden und deren Sprachdateien einlesen
+        self.addon_manager.load_all(self.controller, lang=lang)
 
-        # Hauptfenster erstellen
         self.frame = MainFrame(
             parent=None,
             title="MailClient",

@@ -1,52 +1,18 @@
 """
-Dialoge des MailClients – Screenreader-optimiert (Windows UIA/MSAA konform).
-
-WICHTIG für Windows-Screenreader (NVDA, JAWS, Narrator):
-  Die Windows Accessibility API liest Labels anhand der HWND-Erstellungsreihenfolge.
-  Regel: StaticText-Label MUSS als HWND vor dem zugehörigen TextCtrl erstellt werden.
-  Deshalb: ERST wx.StaticText(...) aufrufen, DANN wx.TextCtrl(...).
-  SetName() auf dem Control ist der zuverlässigste Fallback für alle Screenreader.
+Dialoge – i18n-fähig, Screenreader-optimiert.
+Alle Texte über tr() aus core.i18n.
 """
 
-import wx
-import wx.adv
-import os
-import sys
-import zipfile
-import shutil
-import subprocess
+import wx, wx.adv, os, sys, zipfile, shutil, subprocess
+from core.i18n import tr, get_available_languages, current_language
 
 
-# ------------------------------------------------------------------ #
-#  Hilfsfunktion – korrekte Erstellungsreihenfolge                   #
-# ------------------------------------------------------------------ #
-
-def add_labeled_field(parent, sizer, label_text: str, ctrl_factory,
-                      name: str = None, full_row: bool = False):
-    """
-    Erzeugt ERST das StaticText-Label, DANN das Control (via Factory-Callable).
-    Nur so ist die Windows-HWND-Reihenfolge korrekt für Screenreader.
-
-    ctrl_factory: callable(parent) -> wx.Window
-    Gibt das erzeugte Control zurück.
-    """
-    # 1. Label zuerst erzeugen (niedrigerer HWND-Index)
-    lbl = wx.StaticText(parent, label=label_text)
-
-    # 2. Control danach erzeugen (höherer HWND-Index → AT verknüpft mit vorherigem Label)
+def add_labeled_field(parent, sizer, label_text, ctrl_factory, name=None):
+    lbl  = wx.StaticText(parent, label=label_text)
     ctrl = ctrl_factory(parent)
-
-    # SetName = Label-Text → NVDA/JAWS/Narrator liest diesen als Beschriftung
     ctrl.SetName(name or label_text.rstrip(":").strip())
-
-    # In Sizer einfügen
-    if full_row:
-        sizer.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(ctrl, 1, wx.EXPAND)
-    else:
-        sizer.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(ctrl, 1, wx.EXPAND)
-
+    sizer.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
+    sizer.Add(ctrl, 1, wx.EXPAND)
     return ctrl
 
 
@@ -55,15 +21,14 @@ def add_labeled_field(parent, sizer, label_text: str, ctrl_factory,
 # ================================================================== #
 
 class AccountDialog(wx.Dialog):
-
     PROTOCOLS = ["IMAP", "POP3"]
 
-    def __init__(self, parent, controller, account_id: int = None):
-        title = "Konto bearbeiten" if account_id else "Neues Konto"
+    def __init__(self, parent, controller, account_id=None):
+        title = tr("account_title_edit") if account_id else tr("account_title_new")
         super().__init__(parent, title=title, size=(500, 560),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-        self.controller = controller
-        self.account_id = account_id
+        self.controller  = controller
+        self.account_id  = account_id
         self._build_ui()
         if account_id:
             self._load_account(account_id)
@@ -72,98 +37,53 @@ class AccountDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         outer = wx.BoxSizer(wx.VERTICAL)
-        nb = wx.Notebook(panel)
+        nb    = wx.Notebook(panel)
 
-        # ---- Seite 1: Allgemein ----
+        # General
         pg1 = wx.Panel(nb)
         gs1 = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
         gs1.AddGrowableCol(1)
-
-        # ERST Label, DANN Control erzeugen
-        self.txt_name = add_labeled_field(
-            pg1, gs1, "Anzeigename:",
-            lambda p: wx.TextCtrl(p), "Anzeigename"
-        )
-        self.txt_email = add_labeled_field(
-            pg1, gs1, "E-Mail-Adresse:",
-            lambda p: wx.TextCtrl(p), "E-Mail-Adresse"
-        )
-        self.cho_proto = add_labeled_field(
-            pg1, gs1, "Protokoll:",
-            lambda p: wx.Choice(p, choices=self.PROTOCOLS), "Protokoll"
-        )
+        self.txt_name  = add_labeled_field(pg1, gs1, tr("account_display_name"), lambda p: wx.TextCtrl(p))
+        self.txt_email = add_labeled_field(pg1, gs1, tr("account_email"),        lambda p: wx.TextCtrl(p))
+        self.cho_proto = add_labeled_field(pg1, gs1, tr("account_protocol"),
+                                           lambda p: wx.Choice(p, choices=self.PROTOCOLS))
         self.cho_proto.SetSelection(0)
+        pg1.SetSizer(self._wrap(gs1));  nb.AddPage(pg1, tr("account_tab_general"))
 
-        pg1.SetSizer(self._wrap(gs1))
-        nb.AddPage(pg1, "Allgemein")
-
-        # ---- Seite 2: Posteingang ----
+        # Incoming
         pg2 = wx.Panel(nb)
         gs2 = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
         gs2.AddGrowableCol(1)
-
-        self.txt_in_host = add_labeled_field(
-            pg2, gs2, "Eingangsserver:",
-            lambda p: wx.TextCtrl(p), "Eingangsserver"
-        )
-        self.txt_in_port = add_labeled_field(
-            pg2, gs2, "Port:",
-            lambda p: wx.SpinCtrl(p, min=1, max=65535, initial=993), "Eingangsport"
-        )
-        # Checkbox bekommt kein separates Label (label ist im CheckBox selbst)
+        self.txt_in_host = add_labeled_field(pg2, gs2, tr("account_server_in"), lambda p: wx.TextCtrl(p))
+        self.txt_in_port = add_labeled_field(pg2, gs2, tr("account_port"),
+                                              lambda p: wx.SpinCtrl(p, min=1, max=65535, initial=993))
         gs2.Add(wx.StaticText(pg2, label=""), 0)
-        self.chk_in_ssl = wx.CheckBox(pg2, label="SSL/TLS verwenden")
-        self.chk_in_ssl.SetName("SSL für Posteingang")
-        self.chk_in_ssl.SetValue(True)
-        gs2.Add(self.chk_in_ssl, 0)
+        self.chk_in_ssl = wx.CheckBox(pg2, label=tr("account_ssl"))
+        self.chk_in_ssl.SetValue(True);  gs2.Add(self.chk_in_ssl, 0)
+        self.txt_user = add_labeled_field(pg2, gs2, tr("account_username"), lambda p: wx.TextCtrl(p))
+        self.txt_pass = add_labeled_field(pg2, gs2, tr("account_password"),
+                                           lambda p: wx.TextCtrl(p, style=wx.TE_PASSWORD))
+        pg2.SetSizer(self._wrap(gs2));  nb.AddPage(pg2, tr("account_tab_incoming"))
 
-        self.txt_user = add_labeled_field(
-            pg2, gs2, "Benutzername:",
-            lambda p: wx.TextCtrl(p), "Benutzername"
-        )
-        self.txt_pass = add_labeled_field(
-            pg2, gs2, "Passwort:",
-            lambda p: wx.TextCtrl(p, style=wx.TE_PASSWORD), "Passwort"
-        )
-
-        pg2.SetSizer(self._wrap(gs2))
-        nb.AddPage(pg2, "Posteingang")
-
-        # ---- Seite 3: SMTP ----
+        # Outgoing
         pg3 = wx.Panel(nb)
         gs3 = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
         gs3.AddGrowableCol(1)
-
-        self.txt_out_host = add_labeled_field(
-            pg3, gs3, "SMTP-Server:",
-            lambda p: wx.TextCtrl(p), "SMTP-Server"
-        )
-        self.txt_out_port = add_labeled_field(
-            pg3, gs3, "Port:",
-            lambda p: wx.SpinCtrl(p, min=1, max=65535, initial=587), "SMTP-Port"
-        )
+        self.txt_out_host = add_labeled_field(pg3, gs3, tr("account_server_out"), lambda p: wx.TextCtrl(p))
+        self.txt_out_port = add_labeled_field(pg3, gs3, tr("account_port"),
+                                               lambda p: wx.SpinCtrl(p, min=1, max=65535, initial=587))
         gs3.Add(wx.StaticText(pg3, label=""), 0)
-        self.chk_out_ssl = wx.CheckBox(pg3, label="SSL/TLS verwenden")
-        self.chk_out_ssl.SetName("SSL für Postausgang")
-        self.chk_out_ssl.SetValue(True)
-        gs3.Add(self.chk_out_ssl, 0)
-
-        pg3.SetSizer(self._wrap(gs3))
-        nb.AddPage(pg3, "Postausgang (SMTP)")
+        self.chk_out_ssl = wx.CheckBox(pg3, label=tr("account_ssl"))
+        self.chk_out_ssl.SetValue(True);  gs3.Add(self.chk_out_ssl, 0)
+        pg3.SetSizer(self._wrap(gs3));  nb.AddPage(pg3, tr("account_tab_outgoing"))
 
         outer.Add(nb, 1, wx.EXPAND | wx.ALL, 6)
-
-        btn_sizer = wx.StdDialogButtonSizer()
-        self.btn_ok = wx.Button(panel, wx.ID_OK, "Speichern")
-        btn_cancel  = wx.Button(panel, wx.ID_CANCEL, "Abbrechen")
+        bs = wx.StdDialogButtonSizer()
+        self.btn_ok = wx.Button(panel, wx.ID_OK, tr("account_save"))
+        btn_cancel  = wx.Button(panel, wx.ID_CANCEL, tr("dlg_cancel"))
         self.btn_ok.SetDefault()
-        self.btn_ok.SetName("Speichern")
-        btn_cancel.SetName("Abbrechen")
-        btn_sizer.AddButton(self.btn_ok)
-        btn_sizer.AddButton(btn_cancel)
-        btn_sizer.Realize()
-        outer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 6)
-
+        bs.AddButton(self.btn_ok);  bs.AddButton(btn_cancel);  bs.Realize()
+        outer.Add(bs, 0, wx.EXPAND | wx.ALL, 6)
         panel.SetSizer(outer)
         self.btn_ok.Bind(wx.EVT_BUTTON, self._on_save)
         self.txt_name.SetFocus()
@@ -174,10 +94,9 @@ class AccountDialog(wx.Dialog):
         s.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         return s
 
-    def _load_account(self, account_id):
-        acc = self.controller.get_account(account_id)
-        if not acc:
-            return
+    def _load_account(self, aid):
+        acc = self.controller.get_account(aid)
+        if not acc: return
         self.txt_name.SetValue(str(acc["name"] or ""))
         self.txt_email.SetValue(str(acc["email"] or ""))
         idx = self.PROTOCOLS.index(acc["protocol"]) if acc["protocol"] in self.PROTOCOLS else 0
@@ -193,7 +112,7 @@ class AccountDialog(wx.Dialog):
 
     def _on_save(self, event):
         data = {
-            "id":       self.account_id,
+            "id": self.account_id,
             "name":     self.txt_name.GetValue().strip(),
             "email":    self.txt_email.GetValue().strip(),
             "protocol": self.PROTOCOLS[self.cho_proto.GetSelection()],
@@ -207,8 +126,8 @@ class AccountDialog(wx.Dialog):
             "password": self.txt_pass.GetValue(),
         }
         if not data["name"] or not data["email"]:
-            wx.MessageBox("Bitte Anzeigename und E-Mail-Adresse angeben.",
-                          "Pflichtfelder", wx.OK | wx.ICON_WARNING, self)
+            wx.MessageBox(tr("account_err_required"), tr("error_title"),
+                          wx.OK | wx.ICON_WARNING, self)
             return
         self.controller.save_account(data)
         self.EndModal(wx.ID_OK)
@@ -221,7 +140,7 @@ class AccountDialog(wx.Dialog):
 class SettingsDialog(wx.Dialog):
 
     def __init__(self, parent, controller):
-        super().__init__(parent, title="Einstellungen", size=(460, 380),
+        super().__init__(parent, title=tr("settings_title"), size=(480, 420),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.controller = controller
         self._build_ui()
@@ -233,59 +152,81 @@ class SettingsDialog(wx.Dialog):
         outer = wx.BoxSizer(wx.VERTICAL)
         nb    = wx.Notebook(panel)
 
-        # ---- Allgemein ----
+        # ---- General ----
         pg1 = wx.Panel(nb)
         gs1 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
         gs1.AddGrowableCol(1)
 
-        # Checkboxen: volle Zeile
         gs1.Add(wx.StaticText(pg1, label=""), 0)
-        self.chk_auto = wx.CheckBox(pg1, label="E-Mails automatisch abrufen")
-        self.chk_auto.SetName("Automatischer Abruf")
+        self.chk_auto = wx.CheckBox(pg1, label=tr("settings_auto_fetch"))
+        self.chk_auto.SetName(tr("settings_auto_fetch"))
         gs1.Add(self.chk_auto, 0)
 
         self.spn_interval = add_labeled_field(
-            pg1, gs1, "Abrufintervall (Minuten):",
-            lambda p: wx.SpinCtrl(p, min=1, max=60, initial=10), "Abrufintervall"
-        )
+            pg1, gs1, tr("settings_interval"),
+            lambda p: wx.SpinCtrl(p, min=1, max=60, initial=10))
 
         gs1.Add(wx.StaticText(pg1, label=""), 0)
-        self.chk_html = wx.CheckBox(pg1, label="HTML-Mails rendern")
-        self.chk_html.SetName("HTML-Darstellung")
+        self.chk_html = wx.CheckBox(pg1, label=tr("settings_html"))
+        self.chk_html.SetName(tr("settings_html"))
         gs1.Add(self.chk_html, 0)
 
-        gs1.Add(wx.StaticText(pg1, label=""), 0)
-        self.chk_del = wx.CheckBox(pg1, label="Löschen bestätigen")
-        self.chk_del.SetName("Löschbestätigung")
-        gs1.Add(self.chk_del, 0)
+        # Language chooser
+        langs = get_available_languages()
+        self._lang_codes  = [c for c, _ in langs]
+        self._lang_labels = [n for _, n in langs]
+        self.cho_lang = add_labeled_field(
+            pg1, gs1, tr("settings_language"),
+            lambda p: wx.Choice(p, choices=self._lang_labels),
+            name=tr("settings_language"))
 
         pg1.SetSizer(self._wrap(gs1))
-        nb.AddPage(pg1, "Allgemein")
+        nb.AddPage(pg1, tr("settings_tab_general"))
 
-        # ---- Darstellung ----
+        # ---- Display ----
         pg2 = wx.Panel(nb)
         gs2 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
         gs2.AddGrowableCol(1)
         self.spn_font = add_labeled_field(
-            pg2, gs2, "Schriftgröße Vorschau:",
-            lambda p: wx.SpinCtrl(p, min=8, max=24, initial=10), "Schriftgröße"
-        )
+            pg2, gs2, tr("settings_font_size"),
+            lambda p: wx.SpinCtrl(p, min=8, max=24, initial=10))
         pg2.SetSizer(self._wrap(gs2))
-        nb.AddPage(pg2, "Darstellung")
+        nb.AddPage(pg2, tr("settings_tab_display"))
+
+        # ---- Delete ----
+        pg3 = wx.Panel(nb)
+        gs3 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
+        gs3.AddGrowableCol(1)
+
+        gs3.Add(wx.StaticText(pg3, label=""), 0)
+        self.chk_confirm_del = wx.CheckBox(pg3, label=tr("settings_confirm_delete"))
+        self.chk_confirm_del.SetName(tr("settings_confirm_delete"))
+        gs3.Add(self.chk_confirm_del, 0)
+
+        # Delete mode radio
+        lbl_mode = wx.StaticText(pg3, label=tr("settings_delete_mode"))
+        gs3.Add(lbl_mode, 0, wx.ALIGN_CENTER_VERTICAL)
+        mode_panel = wx.Panel(pg3)
+        mode_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.rb_trash  = wx.RadioButton(mode_panel, label=tr("settings_delete_trash"),  style=wx.RB_GROUP)
+        self.rb_direct = wx.RadioButton(mode_panel, label=tr("settings_delete_direct"))
+        self.rb_trash.SetName(tr("settings_delete_trash"))
+        self.rb_direct.SetName(tr("settings_delete_direct"))
+        mode_sizer.Add(self.rb_trash,  0, wx.BOTTOM, 4)
+        mode_sizer.Add(self.rb_direct, 0)
+        mode_panel.SetSizer(mode_sizer)
+        gs3.Add(mode_panel, 1, wx.EXPAND)
+
+        pg3.SetSizer(self._wrap(gs3))
+        nb.AddPage(pg3, tr("settings_tab_delete"))
 
         outer.Add(nb, 1, wx.EXPAND | wx.ALL, 6)
-
-        btn_sizer = wx.StdDialogButtonSizer()
-        btn_ok     = wx.Button(panel, wx.ID_OK,     "Speichern")
-        btn_cancel = wx.Button(panel, wx.ID_CANCEL, "Abbrechen")
+        bs = wx.StdDialogButtonSizer()
+        btn_ok     = wx.Button(panel, wx.ID_OK,     tr("dlg_save"))
+        btn_cancel = wx.Button(panel, wx.ID_CANCEL, tr("dlg_cancel"))
         btn_ok.SetDefault()
-        btn_ok.SetName("Speichern")
-        btn_cancel.SetName("Abbrechen")
-        btn_sizer.AddButton(btn_ok)
-        btn_sizer.AddButton(btn_cancel)
-        btn_sizer.Realize()
-        outer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 6)
-
+        bs.AddButton(btn_ok);  bs.AddButton(btn_cancel);  bs.Realize()
+        outer.Add(bs, 0, wx.EXPAND | wx.ALL, 6)
         panel.SetSizer(outer)
         btn_ok.Bind(wx.EVT_BUTTON, self._on_save)
 
@@ -297,19 +238,37 @@ class SettingsDialog(wx.Dialog):
 
     def _load(self):
         g = self.controller.get_setting
-        self.chk_auto.SetValue(g("auto_fetch",     "0") == "1")
+        self.chk_auto.SetValue(g("auto_fetch",      "0") == "1")
         self.spn_interval.SetValue(int(g("fetch_interval", "10")))
-        self.chk_html.SetValue(g("render_html",    "0") == "1")
-        self.chk_del.SetValue(g("confirm_delete",  "1") == "1")
-        self.spn_font.SetValue(int(g("font_size",  "10")))
+        self.chk_html.SetValue(g("render_html",     "0") == "1")
+        self.chk_confirm_del.SetValue(g("confirm_delete", "1") == "1")
+        self.spn_font.SetValue(int(g("font_size",   "10")))
+        trash = g("delete_to_trash", "1") == "1"
+        self.rb_trash.SetValue(trash)
+        self.rb_direct.SetValue(not trash)
+        # Language
+        cur = g("language", "de")
+        idx = self._lang_codes.index(cur) if cur in self._lang_codes else 0
+        self.cho_lang.SetSelection(idx)
 
     def _on_save(self, event):
         s = self.controller.set_setting
-        s("auto_fetch",     "1" if self.chk_auto.GetValue() else "0")
-        s("fetch_interval", str(self.spn_interval.GetValue()))
-        s("render_html",    "1" if self.chk_html.GetValue() else "0")
-        s("confirm_delete", "1" if self.chk_del.GetValue() else "0")
-        s("font_size",      str(self.spn_font.GetValue()))
+        s("auto_fetch",      "1" if self.chk_auto.GetValue() else "0")
+        s("fetch_interval",  str(self.spn_interval.GetValue()))
+        s("render_html",     "1" if self.chk_html.GetValue() else "0")
+        s("confirm_delete",  "1" if self.chk_confirm_del.GetValue() else "0")
+        s("font_size",       str(self.spn_font.GetValue()))
+        s("delete_to_trash", "1" if self.rb_trash.GetValue() else "0")
+        idx = self.cho_lang.GetSelection()
+        if 0 <= idx < len(self._lang_codes):
+            new_lang = self._lang_codes[idx]
+            old_lang = self.controller.get_setting("language", "de")
+            s("language", new_lang)
+            if new_lang != old_lang:
+                wx.MessageBox(
+                    "Die Sprachänderung wird beim nächsten Programmstart wirksam.\n"
+                    "The language change will take effect on next startup.",
+                    tr("hint_title"), wx.OK | wx.ICON_INFORMATION, self)
         self.EndModal(wx.ID_OK)
 
 
@@ -320,7 +279,7 @@ class SettingsDialog(wx.Dialog):
 class PrintPreviewDialog(wx.Dialog):
 
     def __init__(self, parent, mail: dict):
-        super().__init__(parent, title="Druckansicht", size=(620, 520),
+        super().__init__(parent, title=tr("print_title"), size=(620, 520),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.mail = mail
         self._build_ui()
@@ -329,39 +288,28 @@ class PrintPreviewDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-
-        lbl = wx.StaticText(panel, label="Druckansicht")
+        lbl   = wx.StaticText(panel, label=tr("print_title"))
         lbl.SetFont(lbl.GetFont().Bold())
         sizer.Add(lbl, 0, wx.ALL, 8)
-
         txt = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_SUNKEN)
-        txt.SetName("Druckvorschau, schreibgeschützt")
+        txt.SetName(tr("print_title"))
         s = self.mail
-        content = (
-            f"Von:     {s.get('sender_name','') or ''} <{s.get('sender','') or ''}>\n"
-            f"An:      {s.get('recipients','') or ''}\n"
-            f"Betreff: {s.get('subject','') or ''}\n"
-            f"Datum:   {s.get('date','') or ''}\n"
-            f"\n{'─'*60}\n\n"
-            f"{s.get('body_text','') or ''}"
+        txt.SetValue(
+            f"{tr('preview_from')}   {s.get('sender_name','') or ''} <{s.get('sender','') or ''}>\n"
+            f"{tr('preview_to')}     {s.get('recipients','') or ''}\n"
+            f"{tr('preview_subject')} {s.get('subject','') or ''}\n"
+            f"{tr('preview_date')}   {s.get('date','') or ''}\n"
+            f"\n{'─'*60}\n\n{s.get('body_text','') or ''}"
         )
-        txt.SetValue(content)
         sizer.Add(txt, 1, wx.EXPAND | wx.ALL, 8)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        btn_print = wx.Button(panel, label="&Drucken")
-        btn_print.SetName("Drucken")
-        btn_close = wx.Button(panel, wx.ID_CLOSE, "&Schließen")
-        btn_close.SetName("Schließen")
-        btn_sizer.Add(btn_print, 0, wx.RIGHT, 8)
-        btn_sizer.Add(btn_close)
-        sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
-
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_print = wx.Button(panel, label=tr("print_btn"))
+        btn_close = wx.Button(panel, wx.ID_CLOSE, tr("dlg_close"))
         btn_print.Bind(wx.EVT_BUTTON, lambda e: wx.MessageBox(
-            "Druckfunktion noch nicht vollständig implementiert.\n"
-            "Bitte Strg+A → Strg+C und aus einem Texteditor drucken.",
-            "Drucken", wx.OK | wx.ICON_INFORMATION, self))
+            tr("print_todo"), tr("print_title"), wx.OK | wx.ICON_INFORMATION, self))
         btn_close.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+        btn_row.Add(btn_print, 0, wx.RIGHT, 8);  btn_row.Add(btn_close)
+        sizer.Add(btn_row, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
         panel.SetSizer(sizer)
         txt.SetFocus()
 
@@ -373,7 +321,7 @@ class PrintPreviewDialog(wx.Dialog):
 class PGPDialog(wx.Dialog):
 
     def __init__(self, parent):
-        super().__init__(parent, title="OpenPGP-Schlüsselverwaltung", size=(520, 400),
+        super().__init__(parent, title=tr("pgp_title"), size=(520, 400),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self._build_ui()
         self.Centre()
@@ -381,38 +329,25 @@ class PGPDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-
-        info = wx.StaticText(panel, label=(
-            "OpenPGP-Integration (Platzhalter)\n\n"
-            "Geplante Funktionen:\n"
-            "  • Schlüsselpaar generieren\n"
-            "  • Öffentlichen Schlüssel importieren/exportieren\n"
-            "  • Schlüsselserver durchsuchen\n"
-            "  • Signierte Mails verifizieren\n"
-            "  • Verschlüsselte Mails entschlüsseln"
-        ))
-        sizer.Add(info, 0, wx.ALL, 14)
-
-        self.list_keys = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.BORDER_SUNKEN)
-        self.list_keys.SetName("PGP-Schlüsselliste")
-        self.list_keys.InsertColumn(0, "Name / E-Mail", width=250)
-        self.list_keys.InsertColumn(1, "Schlüssel-ID",  width=130)
-        self.list_keys.InsertColumn(2, "Gültig bis",    width=80)
-        sizer.Add(self.list_keys, 1, wx.EXPAND | wx.ALL, 8)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        for label in ("&Importieren", "&Exportieren"):
-            b = wx.Button(panel, label=label)
-            b.SetName(label.replace("&", ""))
-            b.Bind(wx.EVT_BUTTON, lambda e: wx.MessageBox(
-                "Noch nicht implementiert.", "Hinweis", wx.OK, self))
-            btn_sizer.Add(b, 0, wx.RIGHT, 6)
-        btn_sizer.AddStretchSpacer()
-        btn_close = wx.Button(panel, wx.ID_CLOSE, "&Schließen")
-        btn_close.SetName("Schließen")
+        sizer.Add(wx.StaticText(panel, label=(
+            tr("pgp_title") + "\n\n(Platzhalter / Placeholder)\npython-gnupg"
+        )), 0, wx.ALL, 14)
+        lst = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.BORDER_SUNKEN)
+        lst.SetName(tr("pgp_title"))
+        lst.InsertColumn(0, tr("pgp_col_name"),  width=250)
+        lst.InsertColumn(1, tr("pgp_col_id"),    width=130)
+        lst.InsertColumn(2, tr("pgp_col_valid"), width=80)
+        sizer.Add(lst, 1, wx.EXPAND | wx.ALL, 8)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        for lbl in (tr("pgp_import"), tr("pgp_export")):
+            b = wx.Button(panel, label=lbl)
+            b.Bind(wx.EVT_BUTTON, lambda e: wx.MessageBox("Not implemented.", "Info", wx.OK, self))
+            row.Add(b, 0, wx.RIGHT, 6)
+        row.AddStretchSpacer()
+        btn_close = wx.Button(panel, wx.ID_CLOSE, tr("dlg_close"))
         btn_close.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
-        btn_sizer.Add(btn_close)
-        sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 8)
+        row.Add(btn_close)
+        sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
         panel.SetSizer(sizer)
 
 
@@ -421,14 +356,9 @@ class PGPDialog(wx.Dialog):
 # ================================================================== #
 
 class AddonManagerDialog(wx.Dialog):
-    """
-    Addon-Verwaltung mit:
-    - Aktivieren / Deaktivieren einzelner Addons
-    - Install via ZIP-Datei (entpacken + Neustart)
-    """
 
     def __init__(self, parent, controller):
-        super().__init__(parent, title="Addon-Verwaltung", size=(580, 460),
+        super().__init__(parent, title=tr("addon_title"), size=(600, 460),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.controller = controller
         self._build_ui()
@@ -438,203 +368,117 @@ class AddonManagerDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(wx.StaticText(panel, label=tr("addon_desc")), 0, wx.ALL, 8)
 
-        lbl = wx.StaticText(panel, label=(
-            "Addons werden aus dem Addon-Verzeichnis geladen.\n"
-            "Doppelklick oder Aktivieren/Deaktivieren schaltet ein Addon um."
-        ))
-        sizer.Add(lbl, 0, wx.ALL, 8)
-
-        self.list_addons = wx.ListCtrl(
-            panel,
-            style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL
-        )
-        self.list_addons.SetName("Addon-Liste")
-        self.list_addons.InsertColumn(0, "Name",         width=160)
-        self.list_addons.InsertColumn(1, "Version",      width=65)
-        self.list_addons.InsertColumn(2, "Status",       width=85)
-        self.list_addons.InsertColumn(3, "Beschreibung", width=230)
+        self.list_addons = wx.ListCtrl(panel,
+            style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL)
+        self.list_addons.SetName(tr("addon_col_name"))
+        self.list_addons.InsertColumn(0, tr("addon_col_name"),    width=160)
+        self.list_addons.InsertColumn(1, tr("addon_col_version"), width=65)
+        self.list_addons.InsertColumn(2, tr("addon_col_status"),  width=85)
+        self.list_addons.InsertColumn(3, tr("addon_col_desc"),    width=240)
         sizer.Add(self.list_addons, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        # Buttons
-        btn_row = wx.BoxSizer(wx.HORIZONTAL)
-
-        self.btn_toggle = wx.Button(panel, label="&Aktivieren / Deaktivieren")
-        self.btn_toggle.SetName("Addon aktivieren oder deaktivieren")
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_toggle = wx.Button(panel, label=tr("addon_toggle"))
+        btn_install     = wx.Button(panel, label=tr("addon_install"))
+        btn_open_dir    = wx.Button(panel, label=tr("addon_open_dir"))
+        btn_close       = wx.Button(panel, wx.ID_CLOSE, tr("dlg_close"))
         self.btn_toggle.Bind(wx.EVT_BUTTON, self._on_toggle)
+        btn_install.Bind(wx.EVT_BUTTON,     self._on_install)
+        btn_open_dir.Bind(wx.EVT_BUTTON,    self._on_open_dir)
+        btn_close.Bind(wx.EVT_BUTTON,       lambda e: self.EndModal(wx.ID_CLOSE))
+        for b in (self.btn_toggle, btn_install, btn_open_dir):
+            row.Add(b, 0, wx.RIGHT, 6)
+        row.AddStretchSpacer();  row.Add(btn_close)
+        sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
 
-        btn_install = wx.Button(panel, label="&Installieren (ZIP)...")
-        btn_install.SetName("Addon aus ZIP-Datei installieren")
-        btn_install.Bind(wx.EVT_BUTTON, self._on_install)
-
-        btn_open_dir = wx.Button(panel, label="&Verzeichnis öffnen")
-        btn_open_dir.SetName("Addon-Verzeichnis im Explorer öffnen")
-        btn_open_dir.Bind(wx.EVT_BUTTON, self._on_open_dir)
-
-        btn_close = wx.Button(panel, wx.ID_CLOSE, "&Schließen")
-        btn_close.SetName("Schließen")
-        btn_close.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
-
-        btn_row.Add(self.btn_toggle, 0, wx.RIGHT, 6)
-        btn_row.Add(btn_install,    0, wx.RIGHT, 6)
-        btn_row.Add(btn_open_dir,   0, wx.RIGHT, 6)
-        btn_row.AddStretchSpacer()
-        btn_row.Add(btn_close)
-        sizer.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
-
-        # Addon-Verzeichnis-Info
         addon_dir = self.controller.addon_mgr.addon_dir
-        lbl_dir = wx.StaticText(panel, label=f"Verzeichnis: {addon_dir}")
-        lbl_dir.SetForegroundColour(wx.Colour(80, 80, 80))
-        sizer.Add(lbl_dir, 0, wx.LEFT | wx.BOTTOM, 8)
-
+        sizer.Add(wx.StaticText(panel,
+            label=tr("addon_dir_label", path=addon_dir)), 0, wx.LEFT | wx.BOTTOM, 8)
         panel.SetSizer(sizer)
         self.list_addons.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_toggle)
 
     def _load_addons(self):
         self.list_addons.DeleteAllItems()
-        mgr       = self.controller.addon_mgr
-        loaded    = mgr.get_loaded_addons()   # {name: AddonBase}
-        available = mgr.scan_addon_dir()       # [name, ...]
-
+        loaded    = self.controller.addon_mgr.get_loaded_addons()
+        available = self.controller.addon_mgr.scan_addon_dir()
         if not available:
-            idx = self.list_addons.InsertItem(0, "(Keine Addons gefunden)")
-            self.list_addons.SetItem(idx, 2, "–")
+            self.list_addons.InsertItem(0, "(–)")
             return
-
         for name in sorted(available):
-            addon   = loaded.get(name)
-            version = addon.VERSION     if addon else "–"
-            status  = "Aktiv"           if addon else "Inaktiv"
-            desc    = addon.DESCRIPTION if addon else ""
-
-            idx = self.list_addons.InsertItem(self.list_addons.GetItemCount(), name)
-            self.list_addons.SetItem(idx, 1, version)
-            self.list_addons.SetItem(idx, 2, status)
-            self.list_addons.SetItem(idx, 3, desc)
-
-            # Aktive Addons farblich hervorheben
+            addon = loaded.get(name)
+            idx   = self.list_addons.InsertItem(self.list_addons.GetItemCount(), name)
+            self.list_addons.SetItem(idx, 1, addon.VERSION if addon else "–")
+            self.list_addons.SetItem(idx, 2,
+                tr("addon_status_active") if addon else tr("addon_status_inactive"))
+            self.list_addons.SetItem(idx, 3, addon.DESCRIPTION if addon else "")
             if addon:
                 self.list_addons.SetItemTextColour(idx, wx.Colour(0, 100, 0))
 
     def _on_toggle(self, event):
-        """Aktiviert oder deaktiviert das ausgewählte Addon."""
         idx = self.list_addons.GetFirstSelected()
         if idx < 0:
-            wx.MessageBox("Bitte zuerst ein Addon in der Liste auswählen.",
-                          "Kein Addon ausgewählt", wx.OK | wx.ICON_INFORMATION, self)
+            wx.MessageBox(tr("addon_no_select"), tr("hint_title"), wx.OK, self)
             return
-
         name   = self.list_addons.GetItemText(idx, 0)
         status = self.list_addons.GetItemText(idx, 2)
         mgr    = self.controller.addon_mgr
-
-        if status == "Aktiv":
-            # Deaktivieren
+        lang   = self.controller.get_setting("language", "de")
+        if status == tr("addon_status_active"):
             mgr.unload_addon(name)
-            wx.MessageBox(f"Addon '{name}' wurde deaktiviert.\n"
-                          "Die Änderung gilt bis zum nächsten Neustart.",
-                          "Addon deaktiviert", wx.OK | wx.ICON_INFORMATION, self)
+            wx.MessageBox(tr("addon_deactivated", name=name), tr("addon_title"), wx.OK, self)
         else:
-            # Aktivieren
-            ok = mgr.load_addon(name, self.controller)
-            if ok:
-                wx.MessageBox(f"Addon '{name}' wurde aktiviert.",
-                              "Addon aktiviert", wx.OK | wx.ICON_INFORMATION, self)
-            else:
-                wx.MessageBox(
-                    f"Addon '{name}' konnte nicht geladen werden.\n"
-                    "Prüfen Sie die Konsole auf Fehlermeldungen.",
-                    "Fehler", wx.OK | wx.ICON_ERROR, self)
-
-        self._load_addons()  # Liste aktualisieren
+            ok = mgr.load_addon(name, self.controller, lang=lang)
+            wx.MessageBox(
+                tr("addon_activated", name=name) if ok else tr("addon_load_error", name=name),
+                tr("addon_title"), wx.OK | (wx.ICON_INFORMATION if ok else wx.ICON_ERROR), self)
+        self._load_addons()
 
     def _on_install(self, event):
-        """
-        Installiert ein Addon aus einer ZIP-Datei.
-        ZIP muss einen Ordner mit __init__.py enthalten.
-        Danach: Neustart der Anwendung.
-        """
-        with wx.FileDialog(
-            self, "Addon-ZIP auswählen",
-            wildcard="ZIP-Datei (*.zip)|*.zip",
-            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST
-        ) as dlg:
+        with wx.FileDialog(self, tr("addon_install"),
+                           wildcard=tr("wildcard_zip"),
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
             if dlg.ShowModal() != wx.ID_OK:
                 return
             zip_path = dlg.GetPath()
-
-        # ZIP prüfen
         try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
+            with zipfile.ZipFile(zip_path) as zf:
                 names = zf.namelist()
         except zipfile.BadZipFile:
-            wx.MessageBox("Die Datei ist keine gültige ZIP-Datei.",
-                          "Fehler", wx.OK | wx.ICON_ERROR, self)
+            wx.MessageBox(tr("addon_not_valid_zip"), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
             return
-
-        # Addon-Verzeichnis ermitteln (erstes Verzeichnis in der ZIP mit __init__.py)
         addon_name = None
         for n in names:
             parts = n.replace("\\", "/").split("/")
             if len(parts) == 2 and parts[1] == "__init__.py" and parts[0]:
-                addon_name = parts[0]
-                break
-
+                addon_name = parts[0]; break
         if not addon_name:
-            wx.MessageBox(
-                "Kein gültiges Addon in der ZIP gefunden.\n\n"
-                "Die ZIP muss einen Ordner mit __init__.py enthalten:\n"
-                "  mein_addon/__init__.py",
-                "Ungültiges Addon", wx.OK | wx.ICON_WARNING, self
-            )
+            wx.MessageBox(tr("addon_install_invalid"), tr("error_title"), wx.OK | wx.ICON_WARNING, self)
             return
-
-        addon_dir  = self.controller.addon_mgr.addon_dir
-        target_dir = os.path.join(addon_dir, addon_name)
-
-        # Bestehende Version fragen
-        if os.path.exists(target_dir):
-            if wx.MessageBox(
-                f"Addon '{addon_name}' ist bereits installiert.\nÜberschreiben?",
-                "Addon überschreiben",
-                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION, self
-            ) != wx.YES:
+        target = os.path.join(self.controller.addon_mgr.addon_dir, addon_name)
+        if os.path.exists(target):
+            if wx.MessageBox(tr("addon_install_overwrite", name=addon_name), tr("addon_title"),
+                             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION, self) != wx.YES:
                 return
-            shutil.rmtree(target_dir, ignore_errors=True)
-
-        # Entpacken
+            shutil.rmtree(target, ignore_errors=True)
         try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(addon_dir)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(self.controller.addon_mgr.addon_dir)
         except Exception as e:
-            wx.MessageBox(f"Fehler beim Entpacken:\n{e}",
-                          "Fehler", wx.OK | wx.ICON_ERROR, self)
+            wx.MessageBox(tr("addon_install_error", error=str(e)), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
             return
-
-        wx.MessageBox(
-            f"Addon '{addon_name}' wurde erfolgreich installiert.\n\n"
-            "Die Anwendung wird jetzt neu gestartet.",
-            "Addon installiert", wx.OK | wx.ICON_INFORMATION, self
-        )
-        self._restart_app()
+        wx.MessageBox(tr("addon_install_ok", name=addon_name), tr("addon_restart_title"), wx.OK, self)
+        subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])])
+        wx.GetApp().GetTopWindow().Close()
 
     def _on_open_dir(self, event):
-        """Öffnet das Addon-Verzeichnis im Windows-Explorer."""
-        addon_dir = self.controller.addon_mgr.addon_dir
-        os.makedirs(addon_dir, exist_ok=True)
+        d = self.controller.addon_mgr.addon_dir
+        os.makedirs(d, exist_ok=True)
         if sys.platform == "win32":
-            os.startfile(addon_dir)
+            os.startfile(d)
         else:
-            subprocess.Popen(["xdg-open", addon_dir])
-
-    @staticmethod
-    def _restart_app():
-        """Startet die Anwendung neu."""
-        python = sys.executable
-        script = os.path.abspath(sys.argv[0])
-        subprocess.Popen([python, script])
-        wx.GetApp().GetTopWindow().Close()
+            subprocess.Popen(["xdg-open", d])
 
 
 # ================================================================== #
@@ -644,7 +488,7 @@ class AddonManagerDialog(wx.Dialog):
 class AboutDialog(wx.Dialog):
 
     def __init__(self, parent):
-        super().__init__(parent, title="Über MailClient", size=(400, 300),
+        super().__init__(parent, title=tr("about_title"), size=(420, 310),
                          style=wx.DEFAULT_DIALOG_STYLE)
         self._build_ui()
         self.Centre()
@@ -652,25 +496,20 @@ class AboutDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-
-        title = wx.StaticText(panel, label="MailClient")
-        title.SetFont(wx.Font(16, wx.FONTFAMILY_DEFAULT,
-                              wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        title = wx.StaticText(panel, label=tr("app_title"))
+        title.SetFont(wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         sizer.Add(title, 0, wx.ALIGN_CENTER | wx.TOP, 20)
-
-        info = wx.StaticText(panel, label=(
-            "Version 1.0.0 (Entwicklungsversion)\n\n"
-            "Screenreader-optimierter E-Mail-Client\n"
-            "Python 3.12 + wxPython\n\n"
-            "Protokolle: IMAP, POP3, SMTP (vorbereitet)\n"
-            "Datenbank: SQLite | Erweiterbar durch Addons"
-        ), style=wx.ALIGN_CENTER)
+        try:
+            v = open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "version.txt")).read().strip()
+        except Exception:
+            v = "1.0.0"
+        info = wx.StaticText(panel,
+            label=tr("about_version", version=v) + "\n\n" + tr("about_desc"),
+            style=wx.ALIGN_CENTER)
         sizer.Add(info, 1, wx.ALIGN_CENTER | wx.ALL, 16)
-
-        btn_close = wx.Button(panel, wx.ID_CLOSE, "&Schließen")
-        btn_close.SetName("Schließen")
-        btn_close.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
-        sizer.Add(btn_close, 0, wx.ALIGN_CENTER | wx.BOTTOM, 16)
+        btn = wx.Button(panel, wx.ID_CLOSE, tr("dlg_close"))
+        btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+        sizer.Add(btn, 0, wx.ALIGN_CENTER | wx.BOTTOM, 16)
         panel.SetSizer(sizer)
 
 
@@ -680,9 +519,9 @@ class AboutDialog(wx.Dialog):
 
 class ComposeDialog(wx.Dialog):
 
-    def __init__(self, parent, controller, reply_to: dict = None,
-                 reply_all: bool = False, forward: dict = None):
-        title = "Antworten" if reply_to else ("Weiterleiten" if forward else "Neue E-Mail")
+    def __init__(self, parent, controller, reply_to=None, reply_all=False, forward=None):
+        title = tr("compose_title_reply") if reply_to else (
+                tr("compose_title_forward") if forward else tr("compose_title_new"))
         super().__init__(parent, title=title, size=(640, 520),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.controller = controller
@@ -693,59 +532,32 @@ class ComposeDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-
-        gs = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
+        gs    = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
         gs.AddGrowableCol(1)
-
-        accounts     = self.controller.get_accounts()
-        from_choices = [f"{a['name']} <{a['email']}>" for a in accounts] or ["(Kein Konto)"]
-
-        self.cho_from = add_labeled_field(
-            panel, gs, "Von:",
-            lambda p: wx.Choice(p, choices=from_choices), "Von"
-        )
+        accs         = self.controller.get_accounts()
+        from_choices = [f"{a['name']} <{a['email']}>" for a in accs] or ["(–)"]
+        self.cho_from    = add_labeled_field(panel, gs, tr("compose_from"),
+                                              lambda p: wx.Choice(p, choices=from_choices))
         self.cho_from.SetSelection(0)
-
-        self.txt_to = add_labeled_field(
-            panel, gs, "An:",
-            lambda p: wx.TextCtrl(p), "An"
-        )
-        self.txt_cc = add_labeled_field(
-            panel, gs, "CC:",
-            lambda p: wx.TextCtrl(p), "CC"
-        )
-        self.txt_subject = add_labeled_field(
-            panel, gs, "Betreff:",
-            lambda p: wx.TextCtrl(p), "Betreff"
-        )
-
+        self.txt_to      = add_labeled_field(panel, gs, tr("compose_to"),      lambda p: wx.TextCtrl(p))
+        self.txt_cc      = add_labeled_field(panel, gs, tr("compose_cc"),      lambda p: wx.TextCtrl(p))
+        self.txt_subject = add_labeled_field(panel, gs, tr("compose_subject"), lambda p: wx.TextCtrl(p))
         sizer.Add(gs, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
-
-        lbl_body = wx.StaticText(panel, label="Nachrichtentext:")
-        sizer.Add(lbl_body, 0, wx.LEFT | wx.TOP, 8)
-
+        sizer.Add(wx.StaticText(panel, label=tr("compose_body")), 0, wx.LEFT | wx.TOP, 8)
         self.txt_body = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.BORDER_SUNKEN)
-        self.txt_body.SetName("Nachrichtentext")
+        self.txt_body.SetName(tr("compose_body"))
         self.txt_body.SetMinSize((-1, 200))
         sizer.Add(self.txt_body, 1, wx.EXPAND | wx.ALL, 8)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        btn_send   = wx.Button(panel, label="&Senden")
-        btn_send.SetName("E-Mail senden")
-        btn_attach = wx.Button(panel, label="&Anhang hinzufügen")
-        btn_attach.SetName("Anhang hinzufügen")
-        btn_disc   = wx.Button(panel, wx.ID_CANCEL, "Verwerfen")
-        btn_disc.SetName("Verwerfen und schließen")
-
-        btn_sizer.Add(btn_send,   0, wx.RIGHT, 8)
-        btn_sizer.Add(btn_attach, 0, wx.RIGHT, 8)
-        btn_sizer.AddStretchSpacer()
-        btn_sizer.Add(btn_disc)
-        sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 8)
-
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_send   = wx.Button(panel, label=tr("compose_send"))
+        btn_attach = wx.Button(panel, label=tr("compose_attach"))
+        btn_disc   = wx.Button(panel, wx.ID_CANCEL, tr("compose_discard"))
         btn_send.Bind(wx.EVT_BUTTON,   self._on_send)
         btn_attach.Bind(wx.EVT_BUTTON, self._on_attach)
+        row.Add(btn_send, 0, wx.RIGHT, 8);  row.Add(btn_attach, 0, wx.RIGHT, 8)
+        row.AddStretchSpacer();  row.Add(btn_disc)
+        sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
         panel.SetSizer(sizer)
         self.txt_to.SetFocus()
 
@@ -756,45 +568,28 @@ class ComposeDialog(wx.Dialog):
                 self.txt_cc.SetValue(str(reply_to.get("recipients") or ""))
             subj = str(reply_to.get("subject") or "")
             self.txt_subject.SetValue(subj if subj.startswith("Re:") else "Re: " + subj)
-            orig = (
-                f"\n\n──────────────────────────────\n"
-                f"Von: {reply_to.get('sender_name','') or ''}"
-                f" <{reply_to.get('sender','') or ''}>\n"
-                f"Datum: {reply_to.get('date','') or ''}\n\n"
-                f"{reply_to.get('body_text','') or ''}"
-            )
-            self.txt_body.SetValue(orig)
+            self.txt_body.SetValue(
+                f"\n\n──────────────────\n"
+                f"{tr('preview_from')} {reply_to.get('sender_name','')} <{reply_to.get('sender','')}>\n"
+                f"{reply_to.get('body_text','') or ''}")
             self.txt_body.SetInsertionPoint(0)
         elif forward:
             subj = str(forward.get("subject") or "")
             self.txt_subject.SetValue(subj if subj.startswith("Fwd:") else "Fwd: " + subj)
-            orig = (
-                f"\n\n──────────────────────────────\n"
-                f"Von: {forward.get('sender_name','') or ''}"
-                f" <{forward.get('sender','') or ''}>\n"
-                f"An: {forward.get('recipients','') or ''}\n"
-                f"Datum: {forward.get('date','') or ''}\n\n"
-                f"{forward.get('body_text','') or ''}"
-            )
-            self.txt_body.SetValue(orig)
+            self.txt_body.SetValue(
+                f"\n\n──────────────────\n"
+                f"{tr('preview_from')} {forward.get('sender_name','')} <{forward.get('sender','')}>\n"
+                f"{forward.get('body_text','') or ''}")
 
     def _on_send(self, event):
         if not self.txt_to.GetValue().strip():
-            wx.MessageBox("Bitte eine Empfängeradresse angeben.",
-                          "Pflichtfeld", wx.OK | wx.ICON_WARNING, self)
+            wx.MessageBox(tr("compose_err_no_to"), tr("error_title"), wx.OK | wx.ICON_WARNING, self)
             return
-        wx.MessageBox(
-            "SMTP-Versand noch nicht implementiert.\n\n"
-            "Das SMTP-Modul kann in protocols/pop3_smtp_handler.py ergänzt werden.",
-            "Nicht implementiert", wx.OK | wx.ICON_INFORMATION, self
-        )
+        wx.MessageBox(tr("compose_smtp_todo"), tr("hint_title"), wx.OK | wx.ICON_INFORMATION, self)
 
     def _on_attach(self, event):
-        with wx.FileDialog(self, "Anhang auswählen",
+        with wx.FileDialog(self, tr("attach_title"),
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as d:
             if d.ShowModal() == wx.ID_OK:
-                wx.MessageBox(
-                    f"{len(d.GetPaths())} Datei(en) ausgewählt.\n"
-                    "Anhang-Unterstützung wird mit dem SMTP-Modul implementiert.",
-                    "Anhang", wx.OK | wx.ICON_INFORMATION, self
-                )
+                wx.MessageBox(tr("attach_msg", count=len(d.GetPaths())),
+                              tr("hint_title"), wx.OK, self)

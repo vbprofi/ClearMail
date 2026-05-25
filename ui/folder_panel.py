@@ -1,12 +1,10 @@
 """
 FolderPanel – Linke Seite: Baumstruktur der Postfächer und Ordner.
-
-Kontextmenü unterscheidet zwischen Postfach-Knoten und Ordner-Knoten.
-Addons können das Kontextmenü über get_folder_context_items() erweitern.
+i18n-fähig, Papierkorb-Unterstützung.
 """
 
 import wx
-
+from core.i18n import tr
 
 # Ordner-Icon-Index
 ICON_MAILBOX  = 0
@@ -145,9 +143,11 @@ class FolderPanel(wx.Panel):
             data = self.tree.GetItemData(item)
             if data and data[0] == "folder":
                 folder_id   = data[1]
-                folder_name = self._folder_map.get(item, {}).get("name", "")
+                f           = self._folder_map.get(item, {})
+                folder_name = f.get("name", "")
+                mailbox_id  = f.get("mailbox_id")
                 if self.on_folder_selected:
-                    self.on_folder_selected(folder_id, folder_name)
+                    self.on_folder_selected(folder_id, folder_name, mailbox_id)
         except RuntimeError:
             pass
 
@@ -306,19 +306,17 @@ class FolderPanel(wx.Panel):
         f = self._folder_map.get(item)
         if not f:
             return
-        if wx.MessageBox(
-            f"Ordner '{f['name']}' und alle darin enthaltenen Mails wirklich löschen?\n"
-            "Diese Aktion kann nicht rückgängig gemacht werden.",
-            "Ordner löschen",
-            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
-            self
-        ) != wx.YES:
-            return
-        conn = self.controller.db._get_mailstore_conn()
-        # Mails löschen, dann Ordner
-        conn.execute("DELETE FROM mails WHERE folder_id = ?", (f["id"],))
-        conn.execute("DELETE FROM folders WHERE id = ?",      (f["id"],))
-        conn.commit()
+        use_trash = self.controller.get_setting("delete_to_trash", "1") == "1"
+        confirm   = self.controller.get_setting("confirm_delete",  "1") == "1"
+
+        if confirm:
+            msg = (tr("dlg_delete_folder_trash", name=f["name"]) if use_trash
+                   else tr("dlg_delete_folder_msg", name=f["name"]))
+            if wx.MessageBox(msg, tr("dlg_delete_folder_title"),
+                             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
+                return
+
+        self.controller.delete_folder(f["id"], f["mailbox_id"], use_trash=use_trash)
         del self._folder_map[item]
         self.tree.Delete(item)
 
@@ -342,13 +340,9 @@ class FolderPanel(wx.Panel):
         mb = self._mailbox_map.get(item)
         if not mb:
             return
-        if wx.MessageBox(
-            f"Postfach '{mb['name']}' wirklich entfernen?\n"
-            "Alle Ordner und Mails dieses Postfachs werden gelöscht.",
-            "Postfach entfernen",
-            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
-            self
-        ) != wx.YES:
+        if wx.MessageBox(tr("dlg_delete_mailbox_msg", name=mb["name"]),
+                         tr("dlg_delete_mailbox_title"),
+                         wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
             return
         conn = self.controller.db._get_mailstore_conn()
         # Mails → Ordner → Postfach löschen
