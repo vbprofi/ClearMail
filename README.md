@@ -173,3 +173,47 @@ Kopieren Sie es nach `~/.mailclient/addons/mail_logger/`.
 - [ ] Benachrichtigungen bei neuen Mails
 - [ ] IMAP IDLE (Push-Benachrichtigungen)
 - [ ] Adressbuch / Kontakte
+
+## 📥 Demo-Version für Windows
+
+Eine kompilierte Demo-Version für Windows steht zum Testen bereit.
+
+**Download:**  
+[ClearMail-Demo-v0.0.0.1.zip](https://github.com/vbprofi/ClearMail/releases/download/demo-v0.0.0.1/ClearMail-Demo-v0.0.0.1.zip)
+
+**Release-Seite:**  
+[https://github.com/vbprofi/ClearMail/releases](https://github.com/vbprofi/ClearMail/releases)
+
+### Systemvoraussetzungen
+- Windows 10 oder höher
+- Keine zusätzliche Python-Installation erforderlich
+
+### Verwendung
+1. Lade die ZIP-Datei herunter
+2. Entpacke sie in einen beliebigen Ordner
+3. Starte `ClearMail.exe`
+
+> **Hinweis:** Dies ist eine Demo-Version. Einige Funktionen sind möglicherweise eingeschränkt.
+
+[![Download Demo](https://img.shields.io/badge/Download-Demo-blue.svg)](https://github.com/vbprofi/ClearMail/releases/download/demo-v0.0.0.1/ClearMail-Demo-v0.0.0.1.zip)
+
+## 📥 Demo Version for Windows
+
+A compiled demo version for Windows is available for testing.
+
+**Download:**  
+[ClearMail-Demo-v0.0.0.1.zip](https://github.com/vbprofi/ClearMail/releases/download/demo-v0.0.0.1/ClearMail-Demo-v0.0.0.1.zip)
+
+**Release Page:**  
+[https://github.com/vbprofi/ClearMail/releases](https://github.com/vbprofi/ClearMail/releases)
+
+### System Requirements
+- Windows 10 or higher
+- No additional Python installation required
+
+### How to use
+1. Download the ZIP file
+2. Extract it to any folder
+3. Run `ClearMail.exe`
+
+> **Note:** This is a demo version. Some features may be limited.
