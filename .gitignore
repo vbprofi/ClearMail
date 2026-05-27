@@ -6,7 +6,11 @@ database/__pycache__/*
 ui/__pycache__/*
 addons/folder_order/__pycache__/*
 addons/mail_logger/__pycache__/*
+addons/addressbook/__pycache__/*
+dist/*
+build/*
 
 # files
 *.exe
 *.cmd
+*.spec

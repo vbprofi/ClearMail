@@ -16,12 +16,12 @@ VSVersionInfo(
       StringTable(
         u'040904B0',
         [StringStruct(u'CompanyName', u'(C)2026'),
-        StringStruct(u'FileDescription', u'pyOutlook'),
+        StringStruct(u'FileDescription', u'ClearMail: Screenreader-optimized email client in Python – accessible, keyboard-driven, modular'),
         StringStruct(u'FileVersion', u'0.0.0.1'),
         StringStruct(u'InternalName', u'pyOutlook'),
         StringStruct(u'LegalCopyright', u'\xa9 2026. All rights reserved.'),
-        StringStruct(u'OriginalFilename', u'pyoutlook.exe'),
-        StringStruct(u'ProductName', u'pyOutlook'),
+        StringStruct(u'OriginalFilename', u'ClearMail.exe'),
+        StringStruct(u'ProductName', u'ClearMail'),
         StringStruct(u'ProductVersion', u'0.0.0.1')])
       ]), 
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
