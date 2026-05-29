@@ -6,6 +6,7 @@ Tab-Navigation via EVT_CHAR_HOOK.
 import wx
 from datetime import datetime
 from core.i18n import tr
+from ui.html_renderer import html_to_text
 
 
 class MailPreviewPanel(wx.Panel):
@@ -100,7 +101,19 @@ class MailPreviewPanel(wx.Panel):
             tr("preview_attach_yes") if mail.get("has_attach") else tr("preview_attach_no")
         )
 
-        body = self._s(mail.get("body_text")) or self._s(mail.get("body_html"))
+        # Vorschau: IMMER reiner Text (kein HTML-Code).
+        # Thunderbird-Verhalten: wenn body_html vorhanden, wird der Text
+        # daraus generiert (vollständiger Inhalt). body_text ist oft ein
+        # manuell eingegebener Kurztext oder fehlt ganz.
+        body_text = self._s(mail.get("body_text"))
+        body_html = self._s(mail.get("body_html"))
+        if body_html:
+            # HTML hat immer Vorrang: alle Inhalte werden extrahiert
+            body = html_to_text(body_html)
+        elif body_text:
+            body = body_text
+        else:
+            body = ""
         self.txt_body.SetValue(body)
         self.txt_body.SetInsertionPoint(0)
 

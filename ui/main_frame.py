@@ -1,3 +1,4 @@
+import os
 """
 MainFrame – Hauptfenster (i18n, Papierkorb-Unterstützung)
 """
@@ -7,6 +8,7 @@ from core.i18n import tr
 from ui.folder_panel import FolderPanel
 from ui.mail_list_panel import MailListPanel
 from ui.mail_preview_panel import MailPreviewPanel
+from ui.mail_viewer import MailViewerFrame
 from ui.dialogs import (
     AccountDialog, SettingsDialog, PrintPreviewDialog,
     PGPDialog, AddonManagerDialog, AboutDialog, ComposeDialog
@@ -20,9 +22,10 @@ class MainFrame(wx.Frame):
                          style=wx.DEFAULT_FRAME_STYLE)
         self.controller = controller
         controller.view = self
-        self._selected_folder_id  = None
+        self._selected_folder_id   = None
         self._selected_mail_id    = None
         self._selected_mailbox_id = None
+        self._selected_folder_name = ""
 
         self._build_menu()
         self._build_status_bar()
@@ -155,6 +158,7 @@ class MainFrame(wx.Frame):
 
         self.folder_panel.on_folder_selected    = self._on_folder_selected
         self.mail_list_panel.on_mail_selected   = self._on_mail_selected
+        self.mail_list_panel.on_mail_open       = self._on_open_mail_viewer
         self.mail_list_panel.on_mail_delete     = self._on_delete_mail
         self.mail_list_panel.on_context_menu    = self._show_mail_context_menu
 
@@ -215,18 +219,35 @@ class MainFrame(wx.Frame):
     def _on_folder_selected(self, folder_id: int, folder_name: str, mailbox_id: int = None):
         self._selected_folder_id  = folder_id
         self._selected_mailbox_id = mailbox_id
+        self._selected_folder_name = folder_name
         mails = self.controller.get_mails(folder_id)
         self.mail_list_panel.load_mails(mails)
         self.mail_preview_panel.clear()
         self.status_bar.SetStatusText(tr("status_folder", name=folder_name), 0)
         self.status_bar.SetStatusText(tr("status_messages", count=len(mails)), 1)
         self._selected_mail_id = None
+        # Titelleiste aktualisieren
+        app_name = tr("app_title")
+        self.SetTitle(tr("title_bar_format", folder=folder_name, app=app_name))
+        # Ausgewählten Ordner persistent speichern
+        self.controller.set_setting("last_folder_id", str(folder_id))
 
     def _on_mail_selected(self, mail_id: int):
         self._selected_mail_id = mail_id
-        mail = self.controller.get_mail(mail_id)
+        mail = self.controller.get_mail(mail_id, self._selected_folder_id)
         if mail:
             self.mail_preview_panel.show_mail(dict(mail))
+            self.mail_list_panel.refresh_mail_read(mail_id)
+            if self._selected_folder_id:
+                self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+
+    def _on_open_mail_viewer(self, mail_id: int):
+        """Öffnet eine Mail in einem eigenen Fenster (Doppelklick / Enter)."""
+        mail = self.controller.get_mail(mail_id, self._selected_folder_id)
+        if mail:
+            viewer = MailViewerFrame(self, dict(mail), controller=self.controller)
+            viewer.Show()
+            # Ungelesen-Status in Liste aktualisieren
             self.mail_list_panel.refresh_mail_read(mail_id)
             if self._selected_folder_id:
                 self.folder_panel.refresh_folder_unread(self._selected_folder_id)
@@ -292,12 +313,13 @@ class MainFrame(wx.Frame):
 
     def _on_mark(self, is_read: bool):
         if not self._selected_mail_id: return
-        self.controller.mark_mail_read(self._selected_mail_id, is_read)
-        if self._selected_folder_id:
-            self.controller.db.update_folder_unread(self._selected_folder_id)
+        fid = self._selected_folder_id
+        self.controller.mark_mail_read(self._selected_mail_id, is_read, folder_id=fid)
+        if fid:
+            self.controller.db.update_folder_unread(fid)
         self.mail_list_panel.refresh_mail_read(self._selected_mail_id, force_read=is_read)
-        if self._selected_folder_id:
-            self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+        if fid:
+            self.folder_panel.refresh_folder_unread(fid)
 
     def _on_flag(self, event):
         if not self._selected_mail_id: return
@@ -317,13 +339,22 @@ class MainFrame(wx.Frame):
     # ------------------------------------------------------------------ #
 
     def _on_open_email(self, event):
+        wildcard = (
+            "Alle unterstützten Formate (*.email;*.eml;*.txt)|*.email;*.eml;*.txt|"
+            "E-Mail-Datei (*.email)|*.email|"
+            "EML-Datei (*.eml)|*.eml|"
+            "Textdatei (*.txt)|*.txt"
+        )
         with wx.FileDialog(self, tr("open_email_title"),
-                           wildcard=tr("wildcard_email"),
+                           wildcard=wildcard,
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as d:
             if d.ShowModal() == wx.ID_OK:
-                data = self.controller.open_email_file(d.GetPath())
+                data = self.controller.open_mail_file(d.GetPath())
                 if data:
+                    # Vorschau aktualisieren UND in eigenem Fenster öffnen
                     self.mail_preview_panel.show_mail(data)
+                    viewer = MailViewerFrame(self, data, controller=self.controller)
+                    viewer.Show()
                 else:
                     wx.MessageBox(tr("error_open_file"), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
@@ -331,10 +362,15 @@ class MainFrame(wx.Frame):
         if not self._selected_mail_id:
             wx.MessageBox(tr("hint_select_mail"), tr("hint_title"), wx.OK, self); return
         with wx.FileDialog(self, tr("save_email_title"),
-                           wildcard=tr("wildcard_email"),
+                           wildcard="E-Mail-Datei (*.email)|*.email|EML-Datei (*.eml)|*.eml",
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as d:
             if d.ShowModal() == wx.ID_OK:
-                if not self.controller.save_mail_as_email(self._selected_mail_id, d.GetPath()):
+                path = d.GetPath()
+                ext  = os.path.splitext(path)[1].lower()
+                ok   = (self.controller.save_mail_as_eml(self._selected_mail_id, path, folder_id=self._selected_folder_id)
+                        if ext == ".eml" else
+                        self.controller.save_mail_as_email(self._selected_mail_id, path, folder_id=self._selected_folder_id))
+                if not ok:
                     wx.MessageBox(tr("error_save_file"), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
     def _on_save_txt(self, event):
@@ -344,7 +380,7 @@ class MainFrame(wx.Frame):
                            wildcard=tr("wildcard_txt"),
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as d:
             if d.ShowModal() == wx.ID_OK:
-                if not self.controller.save_mail_as_txt(self._selected_mail_id, d.GetPath()):
+                if not self.controller.save_mail_as_txt(self._selected_mail_id, d.GetPath(), folder_id=self._selected_folder_id):
                     wx.MessageBox(tr("error_save_file"), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
     def _on_print(self, event):
@@ -428,7 +464,7 @@ class MainFrame(wx.Frame):
         del_label = tr("ctx_delete") + (" → " + tr("folder_trash") if use_trash else "")
 
         items = [
-            (tr("ctx_open"),        lambda e: self._on_mail_selected(self._selected_mail_id)),
+            (tr("ctx_open"),        lambda e: self._on_open_mail_viewer(self._selected_mail_id)),
             (tr("ctx_reply"),       self._on_reply),
             (tr("ctx_forward"),     self._on_forward),
             None,
@@ -457,6 +493,18 @@ class MainFrame(wx.Frame):
 
         self.PopupMenu(menu)
         menu.Destroy()
+
+
+    def _restore_last_folder(self):
+        """Stellt den zuletzt ausgewählten Ordner beim Programmstart wieder her."""
+        last_id = self.controller.get_setting("last_folder_id", "")
+        if not last_id:
+            return
+        try:
+            target_id = int(last_id)
+        except ValueError:
+            return
+        self.folder_panel.select_folder_by_id(target_id)
 
     def set_status(self, text: str, pane: int = 0):
         self.status_bar.SetStatusText(text, pane)

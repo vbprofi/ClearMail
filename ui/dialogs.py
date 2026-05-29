@@ -1,6 +1,5 @@
 """
-Dialoge – i18n-fähig, Screenreader-optimiert.
-Alle Texte über tr() aus core.i18n.
+Dialoge – i18n, Storage-Tab, Auto-Neustart nach Speichern.
 """
 
 import wx, wx.adv, os, sys, zipfile, shutil, subprocess
@@ -16,6 +15,14 @@ def add_labeled_field(parent, sizer, label_text, ctrl_factory, name=None):
     return ctrl
 
 
+def _restart_app():
+    """Startet die Anwendung neu."""
+    python = sys.executable
+    script = os.path.abspath(sys.argv[0])
+    subprocess.Popen([python, script])
+    wx.GetApp().GetTopWindow().Close()
+
+
 # ================================================================== #
 #  AccountDialog                                                      #
 # ================================================================== #
@@ -27,8 +34,8 @@ class AccountDialog(wx.Dialog):
         title = tr("account_title_edit") if account_id else tr("account_title_new")
         super().__init__(parent, title=title, size=(500, 560),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-        self.controller  = controller
-        self.account_id  = account_id
+        self.controller = controller
+        self.account_id = account_id
         self._build_ui()
         if account_id:
             self._load_account(account_id)
@@ -39,7 +46,6 @@ class AccountDialog(wx.Dialog):
         outer = wx.BoxSizer(wx.VERTICAL)
         nb    = wx.Notebook(panel)
 
-        # General
         pg1 = wx.Panel(nb)
         gs1 = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
         gs1.AddGrowableCol(1)
@@ -48,9 +54,8 @@ class AccountDialog(wx.Dialog):
         self.cho_proto = add_labeled_field(pg1, gs1, tr("account_protocol"),
                                            lambda p: wx.Choice(p, choices=self.PROTOCOLS))
         self.cho_proto.SetSelection(0)
-        pg1.SetSizer(self._wrap(gs1));  nb.AddPage(pg1, tr("account_tab_general"))
+        pg1.SetSizer(self._w(gs1));  nb.AddPage(pg1, tr("account_tab_general"))
 
-        # Incoming
         pg2 = wx.Panel(nb)
         gs2 = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
         gs2.AddGrowableCol(1)
@@ -63,9 +68,8 @@ class AccountDialog(wx.Dialog):
         self.txt_user = add_labeled_field(pg2, gs2, tr("account_username"), lambda p: wx.TextCtrl(p))
         self.txt_pass = add_labeled_field(pg2, gs2, tr("account_password"),
                                            lambda p: wx.TextCtrl(p, style=wx.TE_PASSWORD))
-        pg2.SetSizer(self._wrap(gs2));  nb.AddPage(pg2, tr("account_tab_incoming"))
+        pg2.SetSizer(self._w(gs2));  nb.AddPage(pg2, tr("account_tab_incoming"))
 
-        # Outgoing
         pg3 = wx.Panel(nb)
         gs3 = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
         gs3.AddGrowableCol(1)
@@ -75,7 +79,7 @@ class AccountDialog(wx.Dialog):
         gs3.Add(wx.StaticText(pg3, label=""), 0)
         self.chk_out_ssl = wx.CheckBox(pg3, label=tr("account_ssl"))
         self.chk_out_ssl.SetValue(True);  gs3.Add(self.chk_out_ssl, 0)
-        pg3.SetSizer(self._wrap(gs3));  nb.AddPage(pg3, tr("account_tab_outgoing"))
+        pg3.SetSizer(self._w(gs3));  nb.AddPage(pg3, tr("account_tab_outgoing"))
 
         outer.Add(nb, 1, wx.EXPAND | wx.ALL, 6)
         bs = wx.StdDialogButtonSizer()
@@ -89,7 +93,7 @@ class AccountDialog(wx.Dialog):
         self.txt_name.SetFocus()
 
     @staticmethod
-    def _wrap(grid):
+    def _w(grid):
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         return s
@@ -137,10 +141,16 @@ class AccountDialog(wx.Dialog):
 #  SettingsDialog                                                     #
 # ================================================================== #
 
+# Storage-Mode-Codes (müssen mit db_manager übereinstimmen)
+STORAGE_SQLITE_ONE         = "sqlite_one"
+STORAGE_SQLITE_PER_ACCOUNT = "sqlite_per_account"
+STORAGE_FILES              = "files"
+
+
 class SettingsDialog(wx.Dialog):
 
     def __init__(self, parent, controller):
-        super().__init__(parent, title=tr("settings_title"), size=(480, 420),
+        super().__init__(parent, title=tr("settings_title"), size=(500, 480),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.controller = controller
         self._build_ui()
@@ -156,22 +166,17 @@ class SettingsDialog(wx.Dialog):
         pg1 = wx.Panel(nb)
         gs1 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
         gs1.AddGrowableCol(1)
-
         gs1.Add(wx.StaticText(pg1, label=""), 0)
         self.chk_auto = wx.CheckBox(pg1, label=tr("settings_auto_fetch"))
         self.chk_auto.SetName(tr("settings_auto_fetch"))
         gs1.Add(self.chk_auto, 0)
-
         self.spn_interval = add_labeled_field(
             pg1, gs1, tr("settings_interval"),
             lambda p: wx.SpinCtrl(p, min=1, max=60, initial=10))
-
         gs1.Add(wx.StaticText(pg1, label=""), 0)
         self.chk_html = wx.CheckBox(pg1, label=tr("settings_html"))
         self.chk_html.SetName(tr("settings_html"))
         gs1.Add(self.chk_html, 0)
-
-        # Language chooser
         langs = get_available_languages()
         self._lang_codes  = [c for c, _ in langs]
         self._lang_labels = [n for _, n in langs]
@@ -179,8 +184,7 @@ class SettingsDialog(wx.Dialog):
             pg1, gs1, tr("settings_language"),
             lambda p: wx.Choice(p, choices=self._lang_labels),
             name=tr("settings_language"))
-
-        pg1.SetSizer(self._wrap(gs1))
+        pg1.SetSizer(self._w(gs1))
         nb.AddPage(pg1, tr("settings_tab_general"))
 
         # ---- Display ----
@@ -190,35 +194,52 @@ class SettingsDialog(wx.Dialog):
         self.spn_font = add_labeled_field(
             pg2, gs2, tr("settings_font_size"),
             lambda p: wx.SpinCtrl(p, min=8, max=24, initial=10))
-        pg2.SetSizer(self._wrap(gs2))
+        pg2.SetSizer(self._w(gs2))
         nb.AddPage(pg2, tr("settings_tab_display"))
 
         # ---- Delete ----
         pg3 = wx.Panel(nb)
         gs3 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
         gs3.AddGrowableCol(1)
-
         gs3.Add(wx.StaticText(pg3, label=""), 0)
         self.chk_confirm_del = wx.CheckBox(pg3, label=tr("settings_confirm_delete"))
         self.chk_confirm_del.SetName(tr("settings_confirm_delete"))
         gs3.Add(self.chk_confirm_del, 0)
-
-        # Delete mode radio
         lbl_mode = wx.StaticText(pg3, label=tr("settings_delete_mode"))
         gs3.Add(lbl_mode, 0, wx.ALIGN_CENTER_VERTICAL)
         mode_panel = wx.Panel(pg3)
         mode_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.rb_trash  = wx.RadioButton(mode_panel, label=tr("settings_delete_trash"),  style=wx.RB_GROUP)
+        self.rb_trash  = wx.RadioButton(mode_panel, label=tr("settings_delete_trash"), style=wx.RB_GROUP)
         self.rb_direct = wx.RadioButton(mode_panel, label=tr("settings_delete_direct"))
         self.rb_trash.SetName(tr("settings_delete_trash"))
         self.rb_direct.SetName(tr("settings_delete_direct"))
-        mode_sizer.Add(self.rb_trash,  0, wx.BOTTOM, 4)
+        mode_sizer.Add(self.rb_trash, 0, wx.BOTTOM, 4)
         mode_sizer.Add(self.rb_direct, 0)
         mode_panel.SetSizer(mode_sizer)
         gs3.Add(mode_panel, 1, wx.EXPAND)
-
-        pg3.SetSizer(self._wrap(gs3))
+        pg3.SetSizer(self._w(gs3))
         nb.AddPage(pg3, tr("settings_tab_delete"))
+
+        # ---- Storage ----
+        pg4 = wx.Panel(nb)
+        gs4 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
+        gs4.AddGrowableCol(1)
+
+        # Label zuerst, dann Choice (HWND-Reihenfolge für Screenreader)
+        lbl_storage = wx.StaticText(pg4, label=tr("settings_storage_mode"))
+        self._storage_codes  = [STORAGE_SQLITE_ONE, STORAGE_SQLITE_PER_ACCOUNT, STORAGE_FILES]
+        self._storage_labels = [
+            tr("settings_storage_sqlite_one"),
+            tr("settings_storage_sqlite_per_account"),
+            tr("settings_storage_files"),
+        ]
+        self.cho_storage = wx.Choice(pg4, choices=self._storage_labels)
+        self.cho_storage.SetName(tr("settings_storage_mode"))
+        gs4.Add(lbl_storage, 0, wx.ALIGN_CENTER_VERTICAL)
+        gs4.Add(self.cho_storage, 1, wx.EXPAND)
+
+        pg4.SetSizer(self._w(gs4))
+        nb.AddPage(pg4, tr("settings_tab_storage"))
 
         outer.Add(nb, 1, wx.EXPAND | wx.ALL, 6)
         bs = wx.StdDialogButtonSizer()
@@ -231,7 +252,7 @@ class SettingsDialog(wx.Dialog):
         btn_ok.Bind(wx.EVT_BUTTON, self._on_save)
 
     @staticmethod
-    def _wrap(grid):
+    def _w(grid):
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         return s
@@ -246,29 +267,47 @@ class SettingsDialog(wx.Dialog):
         trash = g("delete_to_trash", "1") == "1"
         self.rb_trash.SetValue(trash)
         self.rb_direct.SetValue(not trash)
-        # Language
-        cur = g("language", "de")
-        idx = self._lang_codes.index(cur) if cur in self._lang_codes else 0
-        self.cho_lang.SetSelection(idx)
+        cur_lang = g("language", "de")
+        idx_lang = self._lang_codes.index(cur_lang) if cur_lang in self._lang_codes else 0
+        self.cho_lang.SetSelection(idx_lang)
+        cur_storage = g("mail_storage", STORAGE_SQLITE_ONE)
+        idx_st = self._storage_codes.index(cur_storage) if cur_storage in self._storage_codes else 0
+        self.cho_storage.SetSelection(idx_st)
 
     def _on_save(self, event):
-        s = self.controller.set_setting
-        s("auto_fetch",      "1" if self.chk_auto.GetValue() else "0")
-        s("fetch_interval",  str(self.spn_interval.GetValue()))
-        s("render_html",     "1" if self.chk_html.GetValue() else "0")
-        s("confirm_delete",  "1" if self.chk_confirm_del.GetValue() else "0")
-        s("font_size",       str(self.spn_font.GetValue()))
-        s("delete_to_trash", "1" if self.rb_trash.GetValue() else "0")
-        idx = self.cho_lang.GetSelection()
-        if 0 <= idx < len(self._lang_codes):
-            new_lang = self._lang_codes[idx]
-            old_lang = self.controller.get_setting("language", "de")
-            s("language", new_lang)
-            if new_lang != old_lang:
-                wx.MessageBox(
-                    tr("settings_lang_restart"),
-                    tr("hint_title"), wx.OK | wx.ICON_INFORMATION, self)
+        s   = self.controller.set_setting
+        g   = self.controller.get_setting
+        s("auto_fetch",     "1" if self.chk_auto.GetValue() else "0")
+        s("fetch_interval", str(self.spn_interval.GetValue()))
+        s("render_html",    "1" if self.chk_html.GetValue() else "0")
+        s("confirm_delete", "1" if self.chk_confirm_del.GetValue() else "0")
+        s("font_size",      str(self.spn_font.GetValue()))
+        s("delete_to_trash","1" if self.rb_trash.GetValue() else "0")
+
+        # Sprache
+        idx_lang = self.cho_lang.GetSelection()
+        if 0 <= idx_lang < len(self._lang_codes):
+            s("language", self._lang_codes[idx_lang])
+
+        # Storage-Modus prüfen
+        idx_st   = self.cho_storage.GetSelection()
+        new_mode = self._storage_codes[idx_st] if 0 <= idx_st < len(self._storage_codes) else STORAGE_SQLITE_ONE
+        old_mode = g("mail_storage", STORAGE_SQLITE_ONE)
+
         self.EndModal(wx.ID_OK)
+
+        if new_mode != old_mode:
+            # Migration mit Fortschrittsfenster (importiert hier um Zirkelbezüge zu vermeiden)
+            from ui.migration_dialog import MigrationDialog
+            dlg = MigrationDialog(None, self.controller, new_mode)
+            dlg.ShowModal()
+            dlg.Destroy()
+            # Neustart erfolgt im MigrationDialog – hier nichts mehr tun
+        else:
+            # Kein Moduswechsel: einfacher Neustart
+            wx.MessageBox(tr("settings_restart_now"), tr("settings_restart_title"),
+                          wx.OK | wx.ICON_INFORMATION)
+            _restart_app()
 
 
 # ================================================================== #
@@ -292,7 +331,7 @@ class PrintPreviewDialog(wx.Dialog):
         sizer.Add(lbl, 0, wx.ALL, 8)
         txt = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_SUNKEN)
         txt.SetName(tr("print_title"))
-        s = self.mail
+        s   = self.mail
         txt.SetValue(
             f"{tr('preview_from')}   {s.get('sender_name','') or ''} <{s.get('sender','') or ''}>\n"
             f"{tr('preview_to')}     {s.get('recipients','') or ''}\n"
@@ -328,9 +367,7 @@ class PGPDialog(wx.Dialog):
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(wx.StaticText(panel, label=(
-            tr("pgp_title") + "\n\n(Platzhalter / Placeholder)\npython-gnupg"
-        )), 0, wx.ALL, 14)
+        sizer.Add(wx.StaticText(panel, label=tr("pgp_title") + "\n\n(Platzhalter)\npython-gnupg"), 0, wx.ALL, 14)
         lst = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.BORDER_SUNKEN)
         lst.SetName(tr("pgp_title"))
         lst.InsertColumn(0, tr("pgp_col_name"),  width=250)
@@ -369,7 +406,6 @@ class AddonManagerDialog(wx.Dialog):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(wx.StaticText(panel, label=tr("addon_desc")), 0, wx.ALL, 8)
-
         self.list_addons = wx.ListCtrl(panel,
             style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL)
         self.list_addons.SetName(tr("addon_col_name"))
@@ -378,7 +414,6 @@ class AddonManagerDialog(wx.Dialog):
         self.list_addons.InsertColumn(2, tr("addon_col_status"),  width=85)
         self.list_addons.InsertColumn(3, tr("addon_col_desc"),    width=240)
         sizer.Add(self.list_addons, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
-
         row = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_toggle = wx.Button(panel, label=tr("addon_toggle"))
         btn_install     = wx.Button(panel, label=tr("addon_install"))
@@ -392,10 +427,9 @@ class AddonManagerDialog(wx.Dialog):
             row.Add(b, 0, wx.RIGHT, 6)
         row.AddStretchSpacer();  row.Add(btn_close)
         sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
-
-        addon_dir = self.controller.addon_mgr.addon_dir
         sizer.Add(wx.StaticText(panel,
-            label=tr("addon_dir_label", path=addon_dir)), 0, wx.LEFT | wx.BOTTOM, 8)
+            label=tr("addon_dir_label", path=self.controller.addon_mgr.addon_dir)),
+            0, wx.LEFT | wx.BOTTOM, 8)
         panel.SetSizer(sizer)
         self.list_addons.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_toggle)
 
@@ -404,14 +438,12 @@ class AddonManagerDialog(wx.Dialog):
         loaded    = self.controller.addon_mgr.get_loaded_addons()
         available = self.controller.addon_mgr.scan_addon_dir()
         if not available:
-            self.list_addons.InsertItem(0, "(–)")
-            return
+            self.list_addons.InsertItem(0, "(–)");  return
         for name in sorted(available):
             addon = loaded.get(name)
             idx   = self.list_addons.InsertItem(self.list_addons.GetItemCount(), name)
             self.list_addons.SetItem(idx, 1, addon.VERSION if addon else "–")
-            self.list_addons.SetItem(idx, 2,
-                tr("addon_status_active") if addon else tr("addon_status_inactive"))
+            self.list_addons.SetItem(idx, 2, tr("addon_status_active") if addon else tr("addon_status_inactive"))
             self.list_addons.SetItem(idx, 3, addon.DESCRIPTION if addon else "")
             if addon:
                 self.list_addons.SetItemTextColour(idx, wx.Colour(0, 100, 0))
@@ -419,8 +451,7 @@ class AddonManagerDialog(wx.Dialog):
     def _on_toggle(self, event):
         idx = self.list_addons.GetFirstSelected()
         if idx < 0:
-            wx.MessageBox(tr("addon_no_select"), tr("hint_title"), wx.OK, self)
-            return
+            wx.MessageBox(tr("addon_no_select"), tr("hint_title"), wx.OK, self);  return
         name   = self.list_addons.GetItemText(idx, 0)
         status = self.list_addons.GetItemText(idx, 2)
         mgr    = self.controller.addon_mgr
@@ -430,47 +461,39 @@ class AddonManagerDialog(wx.Dialog):
             wx.MessageBox(tr("addon_deactivated", name=name), tr("addon_title"), wx.OK, self)
         else:
             ok = mgr.load_addon(name, self.controller, lang=lang)
-            wx.MessageBox(
-                tr("addon_activated", name=name) if ok else tr("addon_load_error", name=name),
-                tr("addon_title"), wx.OK | (wx.ICON_INFORMATION if ok else wx.ICON_ERROR), self)
+            wx.MessageBox(tr("addon_activated", name=name) if ok else tr("addon_load_error", name=name),
+                          tr("addon_title"), wx.OK | (wx.ICON_INFORMATION if ok else wx.ICON_ERROR), self)
         self._load_addons()
 
     def _on_install(self, event):
-        with wx.FileDialog(self, tr("addon_install"),
-                           wildcard=tr("wildcard_zip"),
-                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
-            if dlg.ShowModal() != wx.ID_OK:
-                return
-            zip_path = dlg.GetPath()
+        with wx.FileDialog(self, tr("addon_install"), wildcard=tr("wildcard_zip"),
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as d:
+            if d.ShowModal() != wx.ID_OK:  return
+            zip_path = d.GetPath()
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 names = zf.namelist()
         except zipfile.BadZipFile:
-            wx.MessageBox(tr("addon_not_valid_zip"), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
-            return
+            wx.MessageBox(tr("addon_not_valid_zip"), tr("error_title"), wx.OK | wx.ICON_ERROR, self);  return
         addon_name = None
         for n in names:
             parts = n.replace("\\", "/").split("/")
             if len(parts) == 2 and parts[1] == "__init__.py" and parts[0]:
-                addon_name = parts[0]; break
+                addon_name = parts[0];  break
         if not addon_name:
-            wx.MessageBox(tr("addon_install_invalid"), tr("error_title"), wx.OK | wx.ICON_WARNING, self)
-            return
+            wx.MessageBox(tr("addon_install_invalid"), tr("error_title"), wx.OK | wx.ICON_WARNING, self);  return
         target = os.path.join(self.controller.addon_mgr.addon_dir, addon_name)
         if os.path.exists(target):
             if wx.MessageBox(tr("addon_install_overwrite", name=addon_name), tr("addon_title"),
-                             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION, self) != wx.YES:
-                return
+                             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION, self) != wx.YES:  return
             shutil.rmtree(target, ignore_errors=True)
         try:
             with zipfile.ZipFile(zip_path) as zf:
                 zf.extractall(self.controller.addon_mgr.addon_dir)
         except Exception as e:
-            wx.MessageBox(tr("addon_install_error", error=str(e)), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
-            return
+            wx.MessageBox(tr("addon_install_error", error=str(e)), tr("error_title"), wx.OK | wx.ICON_ERROR, self);  return
         wx.MessageBox(tr("addon_install_ok", name=addon_name), tr("addon_restart_title"), wx.OK, self)
-        subprocess.Popen([sys.executable, os.path.abspath(sys.argv[0])])
-        wx.GetApp().GetTopWindow().Close()
+        _restart_app()
 
     def _on_open_dir(self, event):
         d = self.controller.addon_mgr.addon_dir
@@ -482,7 +505,7 @@ class AddonManagerDialog(wx.Dialog):
 
 
 # ================================================================== #
-#  AboutDialog                                                        #
+#  AboutDialog  – liest Version aus version_info.APP_VERSION          #
 # ================================================================== #
 
 class AboutDialog(wx.Dialog):
@@ -499,12 +522,16 @@ class AboutDialog(wx.Dialog):
         title = wx.StaticText(panel, label=tr("app_title"))
         title.SetFont(wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         sizer.Add(title, 0, wx.ALIGN_CENTER | wx.TOP, 20)
+
+        # Version aus version_info lesen (funktioniert im Entwicklungsmodus UND als .exe)
         try:
-            v = open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "version.txt")).read().strip()
+            from version_info import APP_VERSION
+            version = APP_VERSION
         except Exception:
-            v = "1.0.0"
+            version = "?"
+
         info = wx.StaticText(panel,
-            label=tr("about_version", version=v) + "\n\n" + tr("about_desc"),
+            label=tr("about_version", version=version) + "\n\n" + tr("about_desc"),
             style=wx.ALIGN_CENTER)
         sizer.Add(info, 1, wx.ALIGN_CENTER | wx.ALL, 16)
         btn = wx.Button(panel, wx.ID_CLOSE, tr("dlg_close"))
@@ -572,8 +599,7 @@ class ComposeDialog(wx.Dialog):
             self.txt_subject.SetValue(subj if subj.startswith(re_prefix) else re_prefix + subj)
             self.txt_body.SetValue(
                 f"\n\n──────────────────\n"
-                f"{tr('preview_from')} {reply_to.get('sender_name','')}"
-                f" <{reply_to.get('sender','')}>\n"
+                f"{tr('preview_from')} {reply_to.get('sender_name','')} <{reply_to.get('sender','')}>\n"
                 f"{reply_to.get('body_text','') or ''}")
             self.txt_body.SetInsertionPoint(0)
         elif forward:
@@ -581,8 +607,7 @@ class ComposeDialog(wx.Dialog):
             self.txt_subject.SetValue(subj if subj.startswith(fwd_prefix) else fwd_prefix + subj)
             self.txt_body.SetValue(
                 f"\n\n──────────────────\n"
-                f"{tr('preview_from')} {forward.get('sender_name','')}"
-                f" <{forward.get('sender','')}>\n"
+                f"{tr('preview_from')} {forward.get('sender_name','')} <{forward.get('sender','')}>\n"
                 f"{forward.get('body_text','') or ''}")
 
     def _on_send(self, event):
@@ -595,5 +620,4 @@ class ComposeDialog(wx.Dialog):
         with wx.FileDialog(self, tr("attach_title"),
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as d:
             if d.ShowModal() == wx.ID_OK:
-                wx.MessageBox(tr("attach_msg", count=len(d.GetPaths())),
-                              tr("hint_title"), wx.OK, self)
+                wx.MessageBox(tr("attach_msg", count=len(d.GetPaths())), tr("hint_title"), wx.OK, self)

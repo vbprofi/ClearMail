@@ -365,6 +365,18 @@ class FolderPanel(wx.Panel):
                     break
             break
 
+
+    def select_folder_by_id(self, folder_id: int):
+        """Sucht den Ordner mit der gegebenen ID und selektiert ihn im Baum."""
+        for item, f in self._folder_map.items():
+            if f.get("id") == folder_id:
+                try:
+                    self.tree.SelectItem(item)
+                    self.tree.EnsureVisible(item)
+                except RuntimeError:
+                    pass
+                return
+
     def get_selected_folder_name(self) -> str:
         item = self.tree.GetSelection()
         if item.IsOk():

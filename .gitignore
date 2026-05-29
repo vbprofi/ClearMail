@@ -9,6 +9,7 @@ addons/mail_logger/__pycache__/*
 addons/addressbook/__pycache__/*
 dist/*
 build/*
+__pycache__/*
 
 # files
 *.exe

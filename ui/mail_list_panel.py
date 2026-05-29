@@ -21,6 +21,7 @@ class MailListPanel(wx.Panel):
         super().__init__(parent)
         self.controller = controller
         self.on_mail_selected  = None
+        self.on_mail_open      = None   # Doppelklick / Enter → eigenes Fenster
         self.on_mail_delete    = None
         self.on_context_menu   = None
 
@@ -113,12 +114,25 @@ class MailListPanel(wx.Panel):
             self.on_mail_selected(mail["id"])
 
     def _on_item_activated(self, event):
-        self._on_item_selected(event)
+        # Doppelklick / Enter → Mail in eigenem Fenster öffnen
+        idx  = event.GetIndex()
+        mail = self._mail_index.get(idx)
+        if mail and self.on_mail_open:
+            self.on_mail_open(mail["id"])
+        else:
+            self._on_item_selected(event)
 
     def _on_key_down(self, event: wx.KeyEvent):
-        if event.GetKeyCode() == wx.WXK_DELETE:
+        key = event.GetKeyCode()
+        if key == wx.WXK_DELETE:
             if self.on_mail_delete:
                 self.on_mail_delete(event)
+            return
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            idx  = self.list_ctrl.GetFirstSelected()
+            mail = self._mail_index.get(idx)
+            if mail and self.on_mail_open:
+                self.on_mail_open(mail["id"])
             return
         event.Skip()
 

@@ -46,6 +46,8 @@ class MailClientApp(wx.App):
         )
         self.frame.Show()
         self.SetTopWindow(self.frame)
+        # Letzten ausgewählten Ordner wiederherstellen
+        wx.CallAfter(self.frame._restore_last_folder)
         return True
 
     def OnExit(self):
