@@ -78,16 +78,19 @@ def _babel_date_short(dt: datetime) -> str | None:
 def _babel_datetime_full(dt: datetime) -> str | None:
     """Vollständiges Datum mit Wochentag für Preview."""
     try:
-        from babel.dates import format_datetime
+        from babel.dates import format_datetime, format_date, format_time
         lc = locale_code()
         if is_german():
-            # "Montag, 25.09.2025 um 12:01 Uhr"
-            result = format_datetime(dt, format="EEEE, dd.MM.yyyy", locale=lc)
-            time   = format_datetime(dt, format="HH:mm", locale=lc)
-            return f"{result} um {time} Uhr"
+            # babel gibt Wochentag + Datum auf Deutsch zurück
+            wd  = format_date(dt,      format="EEEE",      locale=lc)   # "Samstag"
+            dm  = format_date(dt,      format="dd.MM.yyyy", locale=lc)  # "30.05.2026"
+            hm  = format_time(dt,      format="HH:mm",      locale=lc)  # "22:09"
+            return f"{wd}, {dm} um {hm} Uhr"
         else:
-            # "Monday, September 25, 2025 at 12:01 PM"
-            return format_datetime(dt, format="full", locale=lc)
+            wd  = format_date(dt, format="EEEE",    locale=lc)    # "Saturday"
+            dm  = format_date(dt, format="MMMM d, yyyy", locale=lc)
+            hm  = format_time(dt, format="h:mm a",  locale=lc)
+            return f"{wd}, {dm} at {hm}"
     except Exception:
         return None
 
@@ -96,12 +99,26 @@ def _babel_datetime_full(dt: datetime) -> str | None:
 #  Windows-API-Fallback                                               #
 # ------------------------------------------------------------------ #
 
+_DE_WEEKDAYS = ["Montag","Dienstag","Mittwoch","Donnerstag","Freitag","Samstag","Sonntag"]
+_DE_MONTHS   = ["","Januar","Februar","März","April","Mai","Juni",
+                 "Juli","August","September","Oktober","November","Dezember"]
+
 def _win_strftime(dt: datetime, fmt: str) -> str:
-    """Setzt Thread-Locale temporär (threadsicher) dann strftime."""
+    """
+    Datum formatieren. Auf Windows: Thread-Locale setzen (threadsicher).
+    Für deutschen Wochentag: eingebaute DE-Liste nutzen (sicherer Fallback).
+    """
+    if is_german() and "%A" in fmt:
+        # Wochentag direkt einsetzen – kein Locale-Trick nötig
+        wd  = _DE_WEEKDAYS[dt.weekday()]
+        fmt = fmt.replace("%A", wd)
+    if is_german() and "%B" in fmt:
+        fmt = fmt.replace("%B", _DE_MONTHS[dt.month])
+
     if sys.platform == "win32":
         try:
             import ctypes
-            lc  = locale_code()
+            lc = locale_code()
             if lc:
                 lcid = ctypes.windll.kernel32.LocaleNameToLCID(lc, 0)
                 if lcid:

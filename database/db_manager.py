@@ -114,11 +114,16 @@ class DatabaseManager:
         """Ergänzt fehlende Spalten und bereinigt Duplikate."""
         conn = self._get_structure_conn()
         cols = [r[1] for r in conn.execute("PRAGMA table_info(mails)").fetchall()]
+
         if "body_html" not in cols:
             conn.execute("ALTER TABLE mails ADD COLUMN body_html TEXT DEFAULT ''")
-            conn.commit()
-
-        # imap_path-Spalte in folders hinzufügen falls fehlend
+        if "uid" not in cols:
+            conn.execute("ALTER TABLE mails ADD COLUMN uid TEXT")
+        if "is_flagged" not in cols:
+            conn.execute("ALTER TABLE mails ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0")
+        if "message_id" not in cols:
+            conn.execute("ALTER TABLE mails ADD COLUMN message_id TEXT DEFAULT ''")
+        conn.commit()
         fcols = [r[1] for r in conn.execute("PRAGMA table_info(folders)").fetchall()]
         if "imap_path" not in fcols:
             conn.execute("ALTER TABLE folders ADD COLUMN imap_path TEXT")
@@ -902,13 +907,14 @@ class DatabaseManager:
         conn = self._mail_conn_for_folder(folder_id)
         cur = conn.execute("""
             INSERT INTO mails
-                (folder_id,subject,sender,sender_name,recipients,cc,bcc,
-                 date,body_text,body_html,is_read,has_attach,size,message_id)
+                (folder_id,uid,subject,sender,sender_name,recipients,cc,bcc,
+                 date,body_text,body_html,is_read,is_flagged,has_attach,size,message_id)
             VALUES
-                (:folder_id,:subject,:sender,:sender_name,:recipients,:cc,:bcc,
-                 :date,:body_text,:body_html,:is_read,:has_attach,:size,:message_id)
-        """, {**{"folder_id": folder_id, "cc": "", "bcc": "", "body_html": "",
-                 "is_read": 0, "has_attach": 0, "size": 0, "message_id": ""}, **data})
+                (:folder_id,:uid,:subject,:sender,:sender_name,:recipients,:cc,:bcc,
+                 :date,:body_text,:body_html,:is_read,:is_flagged,:has_attach,:size,:message_id)
+        """, {**{"folder_id": folder_id, "uid": None, "cc": "", "bcc": "", "body_html": "",
+                 "is_read": 0, "is_flagged": 0, "has_attach": 0, "size": 0,
+                 "message_id": ""}, **data})
         conn.commit()
         return cur.lastrowid
 

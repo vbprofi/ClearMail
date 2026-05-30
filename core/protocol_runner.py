@@ -50,9 +50,14 @@ def disable_logging():
 
 
 def log(level: str, msg: str):
-    """Schreibt einen Log-Eintrag wenn Logging aktiv."""
+    """
+    Schreibt einen Log-Eintrag wenn Logging aktiv.
+    level: "debug" | "info" | "warning" | "error"
+    Nur sichtbar in der Log-Datei (Einstellungen → Entwickler).
+    """
     if _logger:
-        getattr(_logger, level, _logger.info)(msg)
+        _fn = getattr(_logger, level.lower(), _logger.info)
+        _fn(msg)
 
 
 def get_log_path(data_dir: str) -> str:
@@ -85,8 +90,11 @@ class ProtocolWorker(threading.Thread):
         self.on_error    = on_error
 
     def run(self):
+        fn_name = getattr(self.fn, "__name__", str(self.fn))
+        log("info", f"ProtocolWorker start: {fn_name}")
         try:
             result = self.fn(progress_cb=self._progress)
+            log("info", f"ProtocolWorker done: {fn_name} result={result}")
             wx.CallAfter(self.on_done, result)
         except Exception as e:
             msg     = str(e)
@@ -94,6 +102,8 @@ class ProtocolWorker(threading.Thread):
                           ("authentication", "login", "password",
                            "credentials", "auth", "anmeld", "passwort",
                            "unauthorized", "535", "534", "430"))
+            log("error", f"ProtocolWorker error (is_auth={is_auth}) {fn_name}: {msg}")
+            wx.CallAfter(self.on_error, msg, is_auth)
             log("error", f"Protokoll-Fehler: {msg}")
             wx.CallAfter(self.on_error, msg, is_auth)
 

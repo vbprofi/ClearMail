@@ -332,5 +332,17 @@
   "menu_view_col_status": "Status (Read)",
   "menu_view_col_from": "From",
   "menu_view_col_subject": "Subject",
-  "menu_view_col_attach": "Attachments"
+  "menu_view_col_attach": "Attachments",
+  "menu_accounts_fetch_sub": "Get new messages",
+  "menu_accounts_fetch_all": "All accounts",
+  "menu_accounts_fetch_cur": "Current account",
+  "menu_file_empty_trash": "Empty Trash",
+  "menu_file_offline": "Offline",
+  "menu_offline_work": "Work offline",
+  "menu_offline_sync": "Download/Sync now…",
+  "empty_trash_confirm": "Permanently delete all messages in Trash?",
+  "empty_trash_done": "{count} message(s) deleted.",
+  "offline_mode_on": "ClearMail is now offline.",
+  "offline_mode_off": "ClearMail is now online.",
+  "fetch_new_account_now": "Download mails from account \"{name}\" now?"
 }

@@ -26,6 +26,14 @@ from typing import List, Dict, Optional
 
 from protocols.imap_handler import IMAPHandler   # parse_email_message wiederverwenden
 
+try:
+    from core.protocol_runner import log as _proto_log
+except ImportError:
+    def _proto_log(level, msg): pass
+
+def log(level: str, msg: str):
+    _proto_log(level, msg)
+
 
 # ================================================================== #
 #  POP3Handler                                                        #
@@ -44,6 +52,7 @@ class POP3Handler:
         self._conn       = None
 
     def connect(self) -> bool:
+        log("info", f"POP3 connect: {self.host}:{self.port} ssl={self.use_ssl} user={self.username}")
         try:
             ctx = ssl.create_default_context()
             if not self.verify_cert:
@@ -57,16 +66,20 @@ class POP3Handler:
                 # STLS (STARTTLS für POP3) anbieten
                 caps = self._conn.capa()
                 if b"STLS" in caps or "STLS" in str(caps):
-                    self._conn.stls(context=ctx)
+                    log("info", "POP3 STLS negotiated")
+                self._conn.stls(context=ctx)
 
             self._conn.user(self.username)
             self._conn.pass_(self.password)
+            log("info", "POP3 AUTH OK")
             return True
         except (poplib.error_proto, OSError, ssl.SSLError) as e:
+            log("error", f"POP3 connect error: {e}")
             raise ConnectionError(f"POP3-Verbindung fehlgeschlagen ({self.host}:{self.port}): {e}") from e
 
     def disconnect(self):
         if self._conn:
+            log("info", f"POP3 disconnect: {self.host}")
             try: self._conn.quit()
             except Exception: pass
             self._conn = None
@@ -98,6 +111,7 @@ class POP3Handler:
 
     def fetch_mail(self, msg_num: int) -> Optional[Dict]:
         """Lädt eine Mail als Dict (parsemail)."""
+        log("debug", f"POP3 RETR {msg_num}")
         resp, lines, octets = self._conn.retr(msg_num)
         raw = b"\r\n".join(lines)
         return IMAPHandler.parse_email_message(raw, include_attachments=True)
@@ -164,6 +178,7 @@ class SMTPHandler:
         )
         raw = msg.as_bytes()
 
+        log("info", f"SMTP send: {self.host}:{self.port} ssl={self.use_ssl} from={from_addr} to={to_addrs}")
         ctx = ssl.create_default_context()
         if not self.verify_cert:
             ctx.check_hostname = False
@@ -174,25 +189,35 @@ class SMTPHandler:
 
             if self.use_ssl and self.port == 465:
                 # SMTPS – implizites SSL
+                log("info", f"SMTP SMTPS connect {self.host}:{self.port}")
                 with smtplib.SMTP_SSL(self.host, self.port, context=ctx) as server:
                     server.login(self.username, self.password)
+                    log("info", "SMTP AUTH OK (SMTPS)")
                     server.sendmail(from_addr, all_recipients, raw)
+                    log("info", f"SMTP sent OK to {all_recipients}")
             else:
                 # STARTTLS (Port 587 oder 25)
+                log("info", f"SMTP STARTTLS connect {self.host}:{self.port}")
                 with smtplib.SMTP(self.host, self.port, timeout=30) as server:
                     server.ehlo()
                     if self.use_ssl:
                         server.starttls(context=ctx)
                         server.ehlo()
+                        log("info", "SMTP STARTTLS negotiated")
                     if self.username:
                         server.login(self.username, self.password)
+                        log("info", "SMTP AUTH OK (STARTTLS)")
                     server.sendmail(from_addr, all_recipients, raw)
+                    log("info", f"SMTP sent OK to {all_recipients}")
 
         except smtplib.SMTPAuthenticationError as e:
+            log("error", f"SMTP AUTH error: {e}")
             raise RuntimeError(f"SMTP-Authentifizierung fehlgeschlagen: {e}") from e
         except smtplib.SMTPRecipientsRefused as e:
+            log("error", f"SMTP recipients refused: {e}")
             raise RuntimeError(f"Empfänger abgelehnt: {e}") from e
         except (smtplib.SMTPException, OSError, ssl.SSLError) as e:
+            log("error", f"SMTP error: {e}")
             raise RuntimeError(f"SMTP-Fehler: {e}") from e
 
         return raw

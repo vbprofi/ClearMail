@@ -278,9 +278,16 @@ class AppController:
         return total
 
     def _fetch_imap(self, acc: dict, progress_cb=None) -> int:
-        from protocols.imap_handler import IMAPHandler
+        """
+        IMAP-Synchronisierung mit UID-Bereichs-Technik (RFC 3501).
+        SEARCH UID {last_uid}:* → nur Mails mit UID > last_uid sind neu.
+        Skaliert bei großen Postfächern ohne vollständigen Index-Scan.
+        """
+        from protocols.imap_sync import IMAPSync
+        from core.protocol_runner import log
+        log("info", f"Fetch IMAP: account={acc.get('name')} host={acc.get('in_host')}")
 
-        handler = IMAPHandler(
+        syncer = IMAPSync(
             host=acc["in_host"], port=int(acc["in_port"] or 993),
             username=acc["username"] or acc["email"],
             password=acc["password"] or "",
@@ -288,71 +295,71 @@ class AppController:
         )
 
         count = 0
-        with handler:
+        with syncer:
             if progress_cb:
                 progress_cb("Ordnerstruktur wird abgerufen…", 0, 0)
 
-            server_folders = handler.list_folders()
+            server_folders = syncer.list_folders()
             folder_map     = self._sync_imap_folders(acc, server_folders)
 
             FOLDER_ORDER = ["inbox","sent","drafts","outbox","trash","spam","archive","custom"]
             def _fkey(fi):
                 ft = self._guess_folder_type(fi["name"])
                 return FOLDER_ORDER.index(ft) if ft in FOLDER_ORDER else len(FOLDER_ORDER)
+            sorted_folders = sorted(server_folders, key=_fkey)
 
-            sorted_folders = sorted(
-                [f for f in server_folders if "\\Noselect" not in f.get("flags", [])],
-                key=_fkey
-            )
-
-            # Phase 1: Alle neuen UIDs pro Ordner zählen
-            folder_uids: list[tuple] = []
-            for folder_info in sorted_folders:
-                imap_path = folder_info["path"]
+            # Phase 1: Pro Ordner die höchste bekannte UID ermitteln
+            # (kein vollständiger UID-Scan – nur MAX(uid) aus DB)
+            folder_tasks: list[tuple] = []
+            for fi in sorted_folders:
+                imap_path = fi["path"]
                 folder_id = folder_map.get(imap_path)
                 if not folder_id:
                     continue
-                known    = self._get_known_uids(folder_id)
-                all_uids = handler.fetch_all_uids(imap_path)
-                new_uids = [u for u in all_uids if u not in known]
-                if new_uids:
-                    folder_uids.append((imap_path, folder_id, new_uids))
+                last_uid = self._get_max_uid(folder_id)
+                folder_tasks.append((imap_path, folder_id, last_uid,
+                                     fi["name"].split(".")[-1]))
 
-            total_new = sum(len(u) for _, _, u in folder_uids)
+            # Phase 2: Neue Mails per UID-Bereich laden
+            # Unbekannt wie viele kommen → Pulse-Fortschritt bis wir total kennen
+            total_est = 0
             fetched   = 0
 
-            if total_new == 0:
+            for imap_path, folder_id, last_uid, folder_name in folder_tasks:
                 if progress_cb:
-                    progress_cb("Keine neuen Mails.", 100, 0)
-                return 0
+                    progress_cb(f"Prüfe {folder_name}…", -1, 0)
 
-            if progress_cb:
-                progress_cb(f"0 / {total_new} Mails werden geladen…", 0, total_new)
+                new_in_folder = []
+                try:
+                    for uid_str, raw, flags_raw in syncer.new_mails_since(imap_path, last_uid):
+                        new_in_folder.append((uid_str, raw, flags_raw))
+                except Exception as e:
+                    log("error", f"IMAP new_mails_since {imap_path!r}: {e}")
+                    continue
 
-            # Phase 2: Vollständige Mails laden inkl. korrekter FLAGS
-            for imap_path, folder_id, new_uids in folder_uids:
-                folder_name = imap_path.split("/")[-1].split(".")[-1]
-                batch_size  = 10
-                for i in range(0, len(new_uids), batch_size):
-                    for uid in new_uids[i:i + batch_size]:
-                        try:
-                            m = handler.fetch_mail(uid, imap_path)
-                            if m:
-                                # is_read direkt aus IMAP-FLAGS (\\Seen)
-                                # is_flagged direkt aus IMAP-FLAGS (\\Flagged)
-                                m["folder_id"] = folder_id
-                                self.db.insert_mail(folder_id, m)
-                                count += 1
-                        except Exception:
-                            pass
-                        fetched += 1
-                        if progress_cb and total_new > 0:
-                            pct = int(fetched / total_new * 100)
-                            progress_cb(f"{fetched}/{total_new} – {folder_name}…",
-                                        pct, total_new)
-                if new_uids:
+                total_est += len(new_in_folder)
+                inserted_in_folder = 0
+                for uid_str, raw, flags_raw in new_in_folder:
+                    try:
+                        m = IMAPSync.parse_mail(uid_str, raw, flags_raw)
+                        m["folder_id"] = folder_id
+                        self.db.insert_mail(folder_id, m)
+                        log("debug", f"IMAP stored UID={uid_str} subject={str(m.get('subject',''))[:50]!r}")
+                        count += 1
+                        inserted_in_folder += 1
+                    except Exception as e:
+                        log("error", f"IMAP insert UID={uid_str}: {e}")
+                    fetched += 1
+                    if progress_cb:
+                        pct = int(fetched / max(total_est, 1) * 100)
+                        progress_cb(f"{fetched}/{total_est} – {folder_name}…",
+                                    pct, total_est)
+
+                if inserted_in_folder:
                     self.db.update_folder_unread(folder_id)
 
+        if progress_cb and count == 0:
+            progress_cb("Keine neuen Mails.", 100, 0)
         return count
 
     def _fetch_pop3(self, acc: dict, progress_cb=None) -> int:
@@ -392,6 +399,8 @@ class AppController:
         """
         from protocols.pop3_smtp_handler import SMTPHandler
         from protocols.imap_handler import IMAPHandler
+        from core.protocol_runner import log
+        log("info", "send_outbox: start")
 
         outbox_id = self._get_outbox_folder_id()
         if not outbox_id:
@@ -556,27 +565,42 @@ class AppController:
         if n in ("outbox", "postausgang"):                             return "outbox"
         return "custom"
 
-    def _get_known_uids(self, folder_id: int) -> set:
-        """Gibt alle bekannten UIDs eines Ordners direkt per SQL zurück (schnell)."""
+    def _get_max_uid(self, folder_id: int) -> int:
+        """
+        Gibt die höchste bekannte UID eines Ordners zurück.
+        Für SEARCH UID {max+1}:* – deutlich schneller als alle UIDs laden.
+        Gibt 0 zurück wenn keine Mails vorhanden (→ alle laden).
+        """
         try:
             mode = self.db.get_setting("mail_storage", "sqlite_one")
+            sql  = "SELECT MAX(CAST(uid AS INTEGER)) FROM mails WHERE folder_id=? AND uid IS NOT NULL AND uid != ''"
             if mode == "sqlite_one":
-                rows = self.db._get_structure_conn().execute(
-                    "SELECT uid FROM mails WHERE folder_id=? AND uid IS NOT NULL AND uid != ''",
-                    (folder_id,)
-                ).fetchall()
-                return {str(r[0]) for r in rows}
+                row = self.db._get_structure_conn().execute(sql, (folder_id,)).fetchone()
             elif mode == "sqlite_per_account":
                 conn = self.db._mail_conn_for_folder(folder_id)
-                rows = conn.execute(
-                    "SELECT uid FROM mails WHERE folder_id=? AND uid IS NOT NULL AND uid != ''",
-                    (folder_id,)
-                ).fetchall()
-                return {str(r[0]) for r in rows}
+                row  = conn.execute(sql, (folder_id,)).fetchone()
             else:
-                # File-Backend: UIDs aus JSON-Metadaten
+                # File-Backend: max UID aus JSON-Metadaten
+                mails = self.db.get_mails(folder_id)
+                uids  = [int(dict(m).get("uid", 0) or 0) for m in mails]
+                return max(uids) if uids else 0
+            return int(row[0]) if row and row[0] else 0
+        except Exception:
+            return 0
+
+    def _get_known_uids(self, folder_id: int) -> set:
+        """Kompatibilitäts-Wrapper – nutzt _get_max_uid intern nicht mehr."""
+        try:
+            mode = self.db.get_setting("mail_storage", "sqlite_one")
+            sql  = "SELECT uid FROM mails WHERE folder_id=? AND uid IS NOT NULL AND uid != ''"
+            if mode == "sqlite_one":
+                rows = self.db._get_structure_conn().execute(sql, (folder_id,)).fetchall()
+            elif mode == "sqlite_per_account":
+                rows = self.db._mail_conn_for_folder(folder_id).execute(sql, (folder_id,)).fetchall()
+            else:
                 mails = self.db.get_mails(folder_id)
                 return {str(dict(m).get("uid", "")) for m in mails if dict(m).get("uid")}
+            return {str(r[0]) for r in rows}
         except Exception:
             return set()
 

@@ -1,8 +1,8 @@
 # version.txt
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 0, 0, 4),
-    prodvers=(0, 0, 0, 4),
+    filevers=(0, 0, 0, 5),
+    prodvers=(0, 0, 0, 5),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
         u'040904B0',
         [StringStruct(u'CompanyName', u'(C)2026'),
         StringStruct(u'FileDescription', u'ClearMail: Screenreader-optimized email client in Python – accessible, keyboard-driven, modular'),
-        StringStruct(u'FileVersion', u'0.0.0.4'),
+        StringStruct(u'FileVersion', u'0.0.0.5'),
         StringStruct(u'InternalName', u'pyOutlook'),
         StringStruct(u'LegalCopyright', u'\xa9 2026. All rights reserved.'),
         StringStruct(u'OriginalFilename', u'ClearMail.exe'),
         StringStruct(u'ProductName', u'ClearMail'),
-        StringStruct(u'ProductVersion', u'0.0.0.4')])
+        StringStruct(u'ProductVersion', u'0.0.0.5')])
       ]), 
     VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
   ]

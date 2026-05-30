@@ -6,6 +6,7 @@ ESC/Tab via _on_all_keys (kombinierter Handler an Frame + _book + _html_widget).
 import wx
 import os
 from core.i18n import tr
+from core.date_utils import format_date_preview
 from ui.html_renderer import html_to_text, create_html_widget, set_html_content
 
 try:
@@ -171,6 +172,10 @@ class MailViewerFrame(wx.Frame):
     @staticmethod
     def _s(v, default=""): return default if v is None else str(v)
 
+    @staticmethod
+    def _format_date(date_str: str) -> str:
+        return format_date_preview(date_str)
+
     def _populate(self, mail: dict):
         sn = self._s(mail.get("sender_name"))
         se = self._s(mail.get("sender"))
@@ -178,7 +183,7 @@ class MailViewerFrame(wx.Frame):
         self.txt_to.SetValue(self._s(mail.get("recipients")))
         self.txt_cc.SetValue(self._s(mail.get("cc")))
         self.txt_subject.SetValue(self._s(mail.get("subject"), tr("preview_no_subject")))
-        self.txt_date.SetValue(self._s(mail.get("date")))
+        self.txt_date.SetValue(self._format_date(self._s(mail.get("date"))))
 
         body_html = self._s(mail.get("body_html"))
         body_text = self._s(mail.get("body_text"))

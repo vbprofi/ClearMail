@@ -29,6 +29,7 @@ class MainFrame(wx.Frame):
         self._selected_mailbox_id = None
         self._selected_folder_name = ""
         self._mark_read_timer      = None   # wx.CallLater für „Als gelesen nach X Sek."
+        self._is_offline           = False  # Offline-Modus
 
         self._build_menu()
         self._build_status_bar()
@@ -50,6 +51,16 @@ class MainFrame(wx.Frame):
         self.mi_open_email = mf.Append(wx.ID_OPEN,   tr("menu_file_open"))
         self.mi_save_email = mf.Append(wx.ID_SAVE,   tr("menu_file_save"))
         self.mi_save_txt   = mf.Append(wx.ID_ANY,    tr("menu_file_save_txt"))
+        mf.AppendSeparator()
+        self.mi_empty_trash = mf.Append(wx.ID_ANY,   tr("menu_file_empty_trash"))
+        mf.AppendSeparator()
+        # Offline-Untermenü
+        mo = wx.Menu()
+        self.mi_offline_work = mo.AppendCheckItem(wx.ID_ANY, tr("menu_offline_work"))
+        mo.AppendSeparator()
+        self.mi_offline_sync = mo.Append(wx.ID_ANY, tr("menu_offline_sync"))
+        self.mi_offline_sync.Enable(False)  # nur verfügbar wenn offline
+        mf.AppendSubMenu(mo, tr("menu_file_offline"))
         mf.AppendSeparator()
         self.mi_print      = mf.Append(wx.ID_PRINT,  tr("menu_file_print"))
         mf.AppendSeparator()
@@ -126,7 +137,12 @@ class MainFrame(wx.Frame):
         self.mi_edit_account = mac.Append(wx.ID_ANY, tr("menu_accounts_edit"))
         self.mi_del_account  = mac.Append(wx.ID_ANY, tr("menu_accounts_delete"))
         mac.AppendSeparator()
-        self.mi_fetch        = mac.Append(wx.ID_ANY, tr("menu_accounts_fetch"))
+        # Neue Nachrichten abrufen – Untermenü
+        mf2 = wx.Menu()
+        self.mi_fetch_all = mf2.Append(wx.ID_ANY, tr("menu_accounts_fetch_all") + "\tShift+F5")
+        self.mi_fetch_cur = mf2.Append(wx.ID_ANY, tr("menu_accounts_fetch_cur") + "\tF5")
+        mac.AppendSubMenu(mf2, tr("menu_accounts_fetch_sub"))
+        mac.AppendSeparator()
         self.mi_send_outbox  = mac.Append(wx.ID_ANY, tr("menu_accounts_send_outbox"))
         mb.Append(mac, tr("menu_accounts"))
 
@@ -234,7 +250,11 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_new_account,  self.mi_new_account)
         self.Bind(wx.EVT_MENU, self._on_edit_account, self.mi_edit_account)
         self.Bind(wx.EVT_MENU, self._on_del_account,  self.mi_del_account)
-        self.Bind(wx.EVT_MENU, self._on_fetch,        self.mi_fetch)
+        self.Bind(wx.EVT_MENU, self._on_fetch_all,    self.mi_fetch_all)
+        self.Bind(wx.EVT_MENU, self._on_fetch_cur,    self.mi_fetch_cur)
+        self.Bind(wx.EVT_MENU, self._on_empty_trash,  self.mi_empty_trash)
+        self.Bind(wx.EVT_MENU, self._on_offline_toggle, self.mi_offline_work)
+        self.Bind(wx.EVT_MENU, self._on_offline_sync,   self.mi_offline_sync)
         self.Bind(wx.EVT_MENU, self._on_send_outbox,  self.mi_send_outbox)
         self.Bind(wx.EVT_MENU, self._on_settings,     self.mi_settings)
         self.Bind(wx.EVT_MENU, self._on_pgp,          self.mi_pgp)
@@ -643,6 +663,18 @@ class MainFrame(wx.Frame):
         dlg = AccountDialog(self, self.controller)
         if dlg.ShowModal() == wx.ID_OK:
             self.folder_panel.reload()
+            # Neues Konto direkt herunterladen
+            accs = self.controller.get_accounts()
+            if accs:
+                new_acc = dict(accs[-1])  # zuletzt hinzugefügt
+                proto   = new_acc.get("protocol", "LOCAL")
+                if proto not in ("LOCAL",) and new_acc.get("in_host"):
+                    if wx.MessageBox(
+                        tr("fetch_new_account_now", name=new_acc["name"]),
+                        tr("hint_title"),
+                        wx.YES_NO | wx.YES_DEFAULT, self
+                    ) == wx.YES:
+                        self._run_fetch(account_id=new_acc["id"])
         dlg.Destroy()
 
     def _on_edit_account(self, event):
@@ -671,21 +703,33 @@ class MainFrame(wx.Frame):
                     self.mail_list_panel.load_mails([])
                     self.mail_preview_panel.clear()
 
-    def _on_fetch(self, event):
-        """Neue Nachrichten abrufen – läuft in Worker-Thread."""
+    def _run_fetch(self, account_id: int = None):
+        """Gemeinsame Fetch-Logik für Alle/Aktuelles Konto."""
+        if getattr(self, "_is_offline", False):
+            wx.MessageBox(tr("offline_mode_on"), tr("hint_title"),
+                          wx.OK | wx.ICON_INFORMATION, self)
+            return
         accs = [a for a in self.controller.get_accounts()
                 if dict(a).get("protocol", "LOCAL") != "LOCAL"]
+        if account_id:
+            accs = [a for a in accs if dict(a)["id"] == account_id]
         if not accs:
             wx.MessageBox(tr("imap_no_account"), tr("hint_title"),
                           wx.OK | wx.ICON_INFORMATION, self)
             return
         self.status_bar.SetStatusText(tr("fetch_running"), 0)
-        self.mi_fetch.Enable(False)
+        self.mi_fetch_all.Enable(False)
+        self.mi_fetch_cur.Enable(False)
 
         from core.protocol_runner import ProtocolWorker
+        import functools
+
+        fn = functools.partial(self.controller.fetch_new_mails,
+                               account_id=account_id)
 
         def _done(count):
-            self.mi_fetch.Enable(True)
+            self.mi_fetch_all.Enable(True)
+            self.mi_fetch_cur.Enable(True)
             self._hide_gauge()
             self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
             self.folder_panel.reload()
@@ -697,7 +741,8 @@ class MainFrame(wx.Frame):
                 self._restore_last_folder()
 
         def _error(msg, is_auth):
-            self.mi_fetch.Enable(True)
+            self.mi_fetch_all.Enable(True)
+            self.mi_fetch_cur.Enable(True)
             self._hide_gauge()
             self.status_bar.SetStatusText("", 0)
             if is_auth:
@@ -710,12 +755,66 @@ class MainFrame(wx.Frame):
             self.status_bar.SetStatusText(msg, 0)
             self._show_gauge(pct)
 
-        ProtocolWorker(
-            fn=self.controller.fetch_new_mails,
-            on_progress=_progress,
-            on_done=_done,
-            on_error=_error,
-        ).start()
+        ProtocolWorker(fn=fn, on_progress=_progress,
+                       on_done=_done, on_error=_error).start()
+
+    def _on_fetch_all(self, event):
+        """Alle Konten abrufen (Shift+F5)."""
+        self._run_fetch(account_id=None)
+
+    def _on_fetch_cur(self, event):
+        """Aktuelles Konto abrufen (F5)."""
+        # Aktuelles Konto aus dem ausgewählten Ordner ermitteln
+        acc_id = None
+        if self._selected_mailbox_id:
+            sc  = self.controller.db._get_structure_conn()
+            row = sc.execute(
+                "SELECT account_id FROM mailboxes WHERE id=?",
+                (self._selected_mailbox_id,)
+            ).fetchone()
+            if row: acc_id = row[0]
+        self._run_fetch(account_id=acc_id)
+
+    def _on_empty_trash(self, event):
+        """Papierkorb leeren – alle Mails endgültig löschen."""
+        if wx.MessageBox(tr("empty_trash_confirm"), tr("menu_file_empty_trash"),
+                         wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
+            return
+        count = 0
+        for mb in self.controller.get_mailboxes():
+            for f in self.controller.get_folders(mb["id"]):
+                if dict(f).get("folder_type") == "trash":
+                    fid   = f["id"]
+                    mails = self.controller.get_mails(fid)
+                    for m in mails:
+                        self.controller.db.delete_mail(dict(m)["id"], fid)
+                        count += 1
+                    self.controller.db.update_folder_unread(fid)
+        wx.MessageBox(tr("empty_trash_done", count=count),
+                      tr("hint_title"), wx.OK, self)
+        self.folder_panel.reload()
+        if self._selected_folder_id:
+            mails = self.controller.get_mails(self._selected_folder_id)
+            self.mail_list_panel.load_mails(mails)
+
+    def _on_offline_toggle(self, event):
+        """Offline-Modus umschalten."""
+        self._is_offline = self.mi_offline_work.IsChecked()
+        self.mi_offline_sync.Enable(self._is_offline)
+        msg = tr("offline_mode_on") if self._is_offline else tr("offline_mode_off")
+        self.status_bar.SetStatusText(msg, 0)
+        self.controller.set_setting("offline_mode", "1" if self._is_offline else "0")
+
+    def _on_offline_sync(self, event):
+        """Im Offline-Modus: jetzt synchronisieren."""
+        if self._is_offline:
+            self._is_offline = False
+            self.mi_offline_work.Check(False)
+            self.mi_offline_sync.Enable(False)
+            self.controller.set_setting("offline_mode", "0")
+            self._run_fetch()
+
+
 
     def _on_send_outbox(self, event):
         """Postausgang senden – läuft in Worker-Thread."""

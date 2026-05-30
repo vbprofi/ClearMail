@@ -332,5 +332,17 @@
   "menu_view_col_status": "Status (Gelesen)",
   "menu_view_col_from": "Von",
   "menu_view_col_subject": "Betreff",
-  "menu_view_col_attach": "Anhänge"
+  "menu_view_col_attach": "Anhänge",
+  "menu_accounts_fetch_sub": "Neue Nachrichten abrufen",
+  "menu_accounts_fetch_all": "Alle Konten",
+  "menu_accounts_fetch_cur": "Aktuelles Konto",
+  "menu_file_empty_trash": "Papierkorb leeren",
+  "menu_file_offline": "Offline",
+  "menu_offline_work": "Offline arbeiten",
+  "menu_offline_sync": "Jetzt herunterladen / synchronisieren…",
+  "empty_trash_confirm": "Alle Mails im Papierkorb endgültig löschen?",
+  "empty_trash_done": "{count} Mail(s) gelöscht.",
+  "offline_mode_on": "ClearMail ist jetzt offline.",
+  "offline_mode_off": "ClearMail ist jetzt online.",
+  "fetch_new_account_now": "Mails von Konto \"{name}\" jetzt herunterladen?"
 }
