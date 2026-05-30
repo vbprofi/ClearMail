@@ -15,6 +15,7 @@ WICHTIG: Das Backend wird beim Erstellen des Widgets bestimmt, nicht vorher.
 from __future__ import annotations
 import re, html as _html_mod
 from html.parser import HTMLParser
+import wx
 
 
 # ------------------------------------------------------------------ #
@@ -128,14 +129,12 @@ def create_html_widget(parent) -> tuple:
         pass
 
     # Fallback: TextCtrl
-    import wx
     ctrl = wx.TextCtrl(
         parent,
         style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_SUNKEN
     )
     ctrl.SetName("Nachrichtentext (Plaintext-Fallback)")
     return ctrl, "textctrl"
-    import wx
     ctrl = wx.TextCtrl(
         parent,
         style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_SUNKEN

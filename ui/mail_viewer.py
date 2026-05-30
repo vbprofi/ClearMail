@@ -8,6 +8,13 @@ import os
 from core.i18n import tr
 from ui.html_renderer import html_to_text, create_html_widget, set_html_content
 
+try:
+    import wx.html2 as _wxhtml2
+    _EVT_WEBVIEW_TITLE_CHANGED = wx.html2.EVT_WEBVIEW_TITLE_CHANGED
+except Exception:
+    _wxhtml2 = None
+    _EVT_WEBVIEW_TITLE_CHANGED = None
+
 
 class MailViewerFrame(wx.Frame):
 
@@ -120,10 +127,14 @@ class MailViewerFrame(wx.Frame):
 
         # ---- Events ----
         # Kombinierter Handler an Frame + _book + _html_widget
-        # → ESC funktioniert auch wenn WebView/HtmlWindow den Fokus hat
         self.Bind(wx.EVT_CHAR_HOOK,        self._on_all_keys)
         self._book.Bind(wx.EVT_CHAR_HOOK,  self._on_all_keys)
         self._html_widget.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
+
+        # WebView2: ESC via JavaScript-Titel-Trick abfangen
+        if self._html_backend == "webview" and _EVT_WEBVIEW_TITLE_CHANGED is not None:
+            self._html_widget.Bind(_EVT_WEBVIEW_TITLE_CHANGED,
+                                   self._on_webview_title_changed)
 
         id_esc = wx.NewIdRef()
         self.SetAcceleratorTable(wx.AcceleratorTable([
@@ -220,15 +231,49 @@ class MailViewerFrame(wx.Frame):
             self._update_toggle_label()
             wx.CallAfter(self.txt_body.SetFocus)
             return
-        # Fokus auf HTML-Widget: WebView2 braucht nach SetPage etwas Zeit.
-        # CallLater(200ms) gibt dem Browser Zeit zum Rendern, dann SetFocus.
+        # Nach dem Laden: Fokus in den Dokument-Body setzen.
+        # Für WebView2 via CallLater + JavaScript:
+        #   1. document.body.setAttribute("tabindex","0") – macht body fokussierbar
+        #   2. document.body.focus()                      – Fokus ins Dokument
+        #   3. ESC-Listener: sendet custom-event zurück zum Python-Frame
         if self._html_backend == "webview":
-            wx.CallLater(200, self._focus_html_widget)
+            wx.CallLater(250, self._webview_focus_and_esc)
         else:
             wx.CallAfter(self._focus_html_widget)
 
+    def _webview_focus_and_esc(self):
+        """
+        WebView2-spezifisch:
+        1. Fokus per JavaScript in den Dokument-Body setzen
+        2. ESC-Taste per JavaScript abfangen → window.close() / title-Trick
+        """
+        if not self._html_mode:
+            return
+        try:
+            self._html_widget.SetFocus()
+            # JavaScript: Body fokussierbar + fokussiert machen,
+            # ESC-KeyDown → document.title setzen (Python polt über EVT_WEBVIEW_TITLE_CHANGED)
+            js = """
+(function(){
+    var b = document.body;
+    if(b){
+        if(!b.getAttribute('tabindex')) b.setAttribute('tabindex','0');
+        b.focus();
+    }
+    document.addEventListener('keydown', function(e){
+        if(e.key === 'Escape'){
+            e.preventDefault();
+            document.title = '__ESC__';
+        }
+    }, true);
+})();
+"""
+            self._html_widget.RunScript(js)
+        except Exception:
+            pass
+
     def _focus_html_widget(self):
-        """Setzt Fokus auf das HTML-Widget (sicher via CallAfter/CallLater)."""
+        """Setzt Fokus auf HtmlWindow/TextCtrl-Widget."""
         try:
             if self._html_mode and self._html_widget.IsShown():
                 self._html_widget.SetFocus()
@@ -293,6 +338,17 @@ class MailViewerFrame(wx.Frame):
                            else (idx + 1) % len(self._tab_fields)
                 self._tab_fields[next_idx].SetFocus()
                 return
+        event.Skip()
+
+    def _on_webview_title_changed(self, event):
+        """WebView2: ESC via JS-Titel-Trick → Fenster schließen."""
+        try:
+            title = self._html_widget.GetCurrentTitle()
+            if title == "__ESC__":
+                self.Close()
+                return
+        except Exception:
+            pass
         event.Skip()
 
     # ------------------------------------------------------------------ #
