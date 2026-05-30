@@ -420,6 +420,9 @@ class MainFrame(wx.Frame):
                                  tr("delete_account_title"),
                                  wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) == wx.YES:
                     self.controller.delete_account(acc["id"])
+                    self.folder_panel.reload()  # Baumstruktur aktualisieren
+                    self.mail_list_panel.load_mails([])
+                    self.mail_preview_panel.clear()
 
     def _on_fetch(self, event):
         wx.MessageBox(tr("fetch_not_impl"), tr("fetch_not_impl_title"),

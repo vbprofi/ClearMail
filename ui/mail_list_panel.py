@@ -58,7 +58,7 @@ class MailListPanel(wx.Panel):
     def _bind_events(self):
         self.list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED,  self._on_item_selected)
         self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_item_activated)
-        self.list_ctrl.Bind(wx.EVT_KEY_DOWN,             self._on_key_down)
+        self.list_ctrl.Bind(wx.EVT_CHAR_HOOK,            self._on_key_down)
         self.list_ctrl.Bind(wx.EVT_CONTEXT_MENU,         self._on_context_menu)
 
     # ------------------------------------------------------------------ #
@@ -127,12 +127,17 @@ class MailListPanel(wx.Panel):
         if key == wx.WXK_DELETE:
             if self.on_mail_delete:
                 self.on_mail_delete(event)
-            return
+            return  # kein Skip → verhindert dass ListCtrl etwas löscht
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            # Enter → Mail in eigenem Fenster öffnen (NICHT Tab ins Vorschau-Feld)
             idx  = self.list_ctrl.GetFirstSelected()
             mail = self._mail_index.get(idx)
             if mail and self.on_mail_open:
                 self.on_mail_open(mail["id"])
+            return  # kein Skip → kein Sprung zum nächsten Control
+        if key == wx.WXK_TAB:
+            # Tab → F6-Navigation (Weiterleitung an Frame)
+            event.Skip()
             return
         event.Skip()
 

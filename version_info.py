@@ -1,64 +1,79 @@
 """
-version_info.py – Liest die App-Version aus version.txt (PyInstaller-Format).
+version_info.py – Liest die App-Version zuverlässig in allen Umgebungen.
 
-PyInstaller bettet version.txt als Windows-VERSIONINFO ein. Nach dem
-Kompilieren ist die Datei NICHT mehr im Dateisystem vorhanden.
-Stattdessen steht die Version in sys.frozen-Umgebung im EXE-Metadaten.
-
-Strategie (in dieser Reihenfolge):
-  1. Laufende .exe → win32api.GetFileVersionInfo()
-  2. Entwicklungsumgebung → version.txt parsen (Regex auf ProductVersion)
-  3. Fallback → "0.0.0.1"
+Strategie:
+  1. Frozen EXE + win32api → GetFileVersionInfo() (StringFileInfo)
+  2. Frozen EXE + win32api → GetFileVersionInfo() (FixedFileInfo Bit-Arithmetik)
+  3. version.txt im _MEIPASS-Verzeichnis (PyInstaller bundelt es via datas)
+  4. version.txt im Skript-Verzeichnis (Entwicklungsumgebung)
+  5. Fallback "0.0.0.1"
 """
 
 from __future__ import annotations
-import os
-import sys
-import re
+import os, sys, re
 
 
 def get_version() -> str:
-    """Gibt die Versionszeichenkette zurück, z.B. '0.0.0.1'."""
 
-    # --- 1. Kompilierte EXE (PyInstaller frozen) ---
+    # ---- 1+2: Kompilierte EXE (win32api) ----
     if getattr(sys, "frozen", False):
-        exe_path = sys.executable
+        exe = sys.executable
+        # Versuch 1: StringFileInfo (bevorzugt – gibt "0.0.0.3" zurück)
+        for codepage in ("040904B0", "040904E4", "04090000", "000004B0"):
+            try:
+                import win32api  # type: ignore
+                v = win32api.GetFileVersionInfo(
+                    exe, f"\\StringFileInfo\\{codepage}\\ProductVersion")
+                if v and str(v).strip():
+                    return str(v).strip()
+            except Exception:
+                pass
+
+        # Versuch 2: FixedFileInfo Bit-Arithmetik
         try:
             import win32api  # type: ignore
-            info = win32api.GetFileVersionInfo(exe_path, "\\StringFileInfo\\040904B0\\ProductVersion")
-            if info:
-                return str(info).strip()
-        except Exception:
-            pass
-        # Fallback: FixedFileInfo direkt lesen
-        try:
-            import win32api  # type: ignore
-            info = win32api.GetFileVersionInfo(exe_path, "\\")
-            ms   = info["ProductVersionMS"]
-            ls   = info["ProductVersionLS"]
-            major = (ms >> 16) & 0xFFFF
-            minor = ms & 0xFFFF
-            patch = (ls >> 16) & 0xFFFF
-            build = ls & 0xFFFF
-            return f"{major}.{minor}.{patch}.{build}"
+            info = win32api.GetFileVersionInfo(exe, "\\")
+            ms, ls = info["ProductVersionMS"], info["ProductVersionLS"]
+            parts = [(ms >> 16) & 0xFFFF, ms & 0xFFFF,
+                     (ls >> 16) & 0xFFFF, ls & 0xFFFF]
+            if any(p > 0 for p in parts):
+                return ".".join(str(p) for p in parts)
         except Exception:
             pass
 
-    # --- 2. Entwicklungsumgebung: version.txt parsen ---
-    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
-    version_file = os.path.join(base, "version.txt")
+    # ---- 3+4: version.txt lesen ----
+    search_dirs = []
+    if getattr(sys, "_MEIPASS", None):
+        search_dirs.append(sys._MEIPASS)          # PyInstaller _MEIPASS
+    search_dirs.append(os.path.dirname(os.path.abspath(__file__)))  # Skript-Dir
 
-    if os.path.exists(version_file):
+    for base in search_dirs:
+        vfile = os.path.join(base, "version.txt")
+        if not os.path.exists(vfile):
+            continue
         try:
-            content = open(version_file, encoding="utf-8").read()
-            # Sucht: StringStruct(u'ProductVersion', u'1.2.3.4')
-            m = re.search(r"ProductVersion['\"\s,u]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", content)
+            content = open(vfile, encoding="utf-8").read()
+
+            # Format: StringStruct(u'ProductVersion', u'0.0.0.3')
+            m = re.search(
+                r"ProductVersion['\"\s,u]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)",
+                content
+            )
             if m:
                 return m.group(1)
-            # Alternativ: prodvers=(1, 2, 3, 4)
-            m2 = re.search(r"prodvers\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", content)
+
+            # Format: prodvers=(0, 0, 0, 3)
+            m2 = re.search(
+                r"prodvers\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)",
+                content
+            )
             if m2:
                 return ".".join(m2.groups())
+
+            # Format: FileVersion=0.0.0.3
+            m3 = re.search(r"FileVersion['\"\s=:,u]*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", content)
+            if m3:
+                return m3.group(1)
         except Exception:
             pass
 

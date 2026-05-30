@@ -523,12 +523,18 @@ class AboutDialog(wx.Dialog):
         title.SetFont(wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         sizer.Add(title, 0, wx.ALIGN_CENTER | wx.TOP, 20)
 
-        # Version aus version_info lesen (funktioniert im Entwicklungsmodus UND als .exe)
+        # Version aus version_info lesen – funktioniert in Entwicklung UND als .exe
+        # Da version_info.py jetzt via datas in _MEIPASS gebündelt wird,
+        # ist APP_VERSION auch in der kompilierten EXE korrekt.
         try:
-            from version_info import APP_VERSION
-            version = APP_VERSION
+            from version_info import get_version
+            version = get_version()   # Immer frisch lesen (nicht gecachten APP_VERSION nutzen)
         except Exception:
-            version = "?"
+            try:
+                from version_info import APP_VERSION
+                version = APP_VERSION
+            except Exception:
+                version = "?"
 
         info = wx.StaticText(panel,
             label=tr("about_version", version=version) + "\n\n" + tr("about_desc"),

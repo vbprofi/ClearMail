@@ -862,15 +862,14 @@ class DatabaseManager:
     def update_folder_unread(self, folder_id: int):
         mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
         if mode == STORAGE_FILES:
-            d = os.path.join(self.data_dir, "mailstore", str(folder_id))
             count = 0
-            if os.path.isdir(d):
+            for d in self._all_file_dirs(folder_id):
+                if not os.path.isdir(d): continue
                 for fn in os.listdir(d):
                     if fn.endswith(".json"):
                         try:
                             with open(os.path.join(d, fn), encoding="utf-8") as f:
                                 m = json.load(f)
-                            # is_read: korrekt als int 0/1 oder bool
                             if int(m.get("is_read", 0)) == 0:
                                 count += 1
                         except Exception: pass
@@ -1086,9 +1085,9 @@ class DatabaseManager:
         sc  = self._get_structure_conn()
         for (fid,) in sc.execute("SELECT id FROM folders").fetchall():
             if mode == STORAGE_FILES:
-                d = os.path.join(self.data_dir, "mailstore", str(fid))
                 count = 0
-                if os.path.isdir(d):
+                for d in self._all_file_dirs(fid):
+                    if not os.path.isdir(d): continue
                     for fn in os.listdir(d):
                         if fn.endswith(".json"):
                             try:
@@ -1116,15 +1115,41 @@ class DatabaseManager:
     # ------------------------------------------------------------------ #
 
     def _mail_file_dir(self, folder_id: int) -> str:
-        d = os.path.join(self.data_dir, "mailstore", str(folder_id))
+        """
+        Gibt den Verzeichnispfad für die Mails eines Ordners zurück.
+        Struktur: mailstore/<account_email>/<folder_name>/
+        Fallback: mailstore/<folder_id>/  (wenn Ordner/Konto nicht gefunden)
+        """
+        sc = self._get_structure_conn()
+        row = sc.execute("""
+            SELECT f.name, f.folder_type, mb.email, mb.account_id
+            FROM folders f
+            JOIN mailboxes mb ON f.mailbox_id = mb.id
+            WHERE f.id = ?
+        """, (folder_id,)).fetchone()
+
+        if row:
+            # Ordnername sauber machen (keine Sonderzeichen im Pfad)
+            import re as _re
+            folder_name = _re.sub(r'[\\/:*?"<>|]', '_', str(row["name"]))
+            account_dir = _re.sub(r'[\\/:*?"<>|@]', '_', str(row["email"]))
+            d = os.path.join(self.data_dir, "mailstore", account_dir, folder_name)
+        else:
+            # Fallback: nur folder_id (alte Daten)
+            d = os.path.join(self.data_dir, "mailstore", str(folder_id))
+
         os.makedirs(d, exist_ok=True)
         return d
 
+    def _mail_file_dir_legacy(self, folder_id: int) -> str:
+        """Alter Pfad für Rückwärtskompatibilität beim Lesen."""
+        return os.path.join(self.data_dir, "mailstore", str(folder_id))
+
     def _write_mail_file(self, m: dict, store_dir: str):
-        """Schreibt JSON-Meta + RFC-2822-.eml-Datei."""
-        folder_id  = int(m.get("folder_id", 0))
-        folder_dir = os.path.join(store_dir, str(folder_id))
-        os.makedirs(folder_dir, exist_ok=True)
+        """Schreibt JSON-Meta + RFC-2822-.eml-Datei in die korrekte Verzeichnisstruktur."""
+        folder_id = int(m.get("folder_id", 0))
+        # Nutze _mail_file_dir für korrekte account/folder-Struktur
+        folder_dir = self._mail_file_dir(folder_id)
 
         mail_id = m.get("id") or hashlib.md5(
             f"{m.get('message_id','')}{m.get('date','')}".encode()).hexdigest()[:12]
@@ -1157,40 +1182,59 @@ class DatabaseManager:
             json.dump(meta, f, ensure_ascii=False, default=str)
 
     def _get_mails_from_files(self, folder_id: int) -> list:
-        d = self._mail_file_dir(folder_id)
-        result = []
-        for fn in sorted(os.listdir(d), reverse=True):
-            if fn.endswith(".json"):
-                try:
-                    with open(os.path.join(d, fn), encoding="utf-8") as f:
-                        meta = json.load(f)
-                    # is_read IMMER als Integer
-                    meta["is_read"]    = int(meta.get("is_read", 0))
-                    meta["is_flagged"] = int(meta.get("is_flagged", 0))
-                    eml = os.path.join(d, fn.replace(".json", ".eml"))
-                    if os.path.exists(eml):
-                        with open(eml, encoding="utf-8", errors="replace") as f:
-                            meta["body_text"] = self._parse_eml_body(f.read())
-                    result.append(_DictRow(meta))
-                except Exception: pass
-        return result
+        """Liest Mails – prüft neuen Pfad (account/folder) UND Legacy-Pfad (folder_id)."""
+        dirs_to_check = []
+        new_dir = self._mail_file_dir(folder_id)
+        legacy_dir = self._mail_file_dir_legacy(folder_id)
+        dirs_to_check.append(new_dir)
+        if legacy_dir != new_dir and os.path.isdir(legacy_dir):
+            dirs_to_check.append(legacy_dir)
 
-    def _get_mail_from_file(self, mail_id, folder_id: int):
-        d = self._mail_file_dir(folder_id)
-        for fn in os.listdir(d):
-            if fn.endswith(".json"):
-                try:
-                    with open(os.path.join(d, fn), encoding="utf-8") as f:
-                        meta = json.load(f)
-                    if str(meta.get("id")) == str(mail_id):
+        result = []
+        for d in dirs_to_check:
+            if not os.path.isdir(d):
+                continue
+            for fn in sorted(os.listdir(d), reverse=True):
+                if fn.endswith(".json"):
+                    try:
+                        with open(os.path.join(d, fn), encoding="utf-8") as f:
+                            meta = json.load(f)
                         meta["is_read"]    = int(meta.get("is_read", 0))
                         meta["is_flagged"] = int(meta.get("is_flagged", 0))
                         eml = os.path.join(d, fn.replace(".json", ".eml"))
                         if os.path.exists(eml):
                             with open(eml, encoding="utf-8", errors="replace") as f:
                                 meta["body_text"] = self._parse_eml_body(f.read())
-                        return _DictRow(meta)
-                except Exception: pass
+                        result.append(_DictRow(meta))
+                    except Exception: pass
+        return result
+
+    def _get_mail_from_file(self, mail_id, folder_id: int):
+        """Sucht eine Mail – prüft neuen Pfad UND Legacy-Pfad."""
+        dirs_to_check = []
+        new_dir = self._mail_file_dir(folder_id)
+        legacy_dir = self._mail_file_dir_legacy(folder_id)
+        dirs_to_check.append(new_dir)
+        if legacy_dir != new_dir and os.path.isdir(legacy_dir):
+            dirs_to_check.append(legacy_dir)
+
+        for d in dirs_to_check:
+            if not os.path.isdir(d):
+                continue
+            for fn in os.listdir(d):
+                if fn.endswith(".json"):
+                    try:
+                        with open(os.path.join(d, fn), encoding="utf-8") as f:
+                            meta = json.load(f)
+                        if str(meta.get("id")) == str(mail_id):
+                            meta["is_read"]    = int(meta.get("is_read", 0))
+                            meta["is_flagged"] = int(meta.get("is_flagged", 0))
+                            eml = os.path.join(d, fn.replace(".json", ".eml"))
+                            if os.path.exists(eml):
+                                with open(eml, encoding="utf-8", errors="replace") as f:
+                                    meta["body_text"] = self._parse_eml_body(f.read())
+                            return _DictRow(meta)
+                    except Exception: pass
         return None
 
     @staticmethod
@@ -1206,52 +1250,66 @@ class DatabaseManager:
         self._write_mail_file({"id": mid, "folder_id": folder_id, **data}, store)
         return mid
 
+
+    def _all_file_dirs(self, folder_id: int) -> list:
+        """Gibt alle zu prüfenden Verzeichnisse zurück (neu + legacy)."""
+        dirs = []
+        new_dir = self._mail_file_dir(folder_id)
+        legacy_dir = self._mail_file_dir_legacy(folder_id)
+        dirs.append(new_dir)
+        if legacy_dir != new_dir and os.path.isdir(legacy_dir):
+            dirs.append(legacy_dir)
+        return dirs
+
     def _update_mail_file_field(self, mail_id, folder_id: int, field: str, value):
-        d = self._mail_file_dir(folder_id)
-        for fn in os.listdir(d):
-            if fn.endswith(".json"):
-                path = os.path.join(d, fn)
-                try:
-                    with open(path, encoding="utf-8") as f: meta = json.load(f)
-                    if str(meta.get("id")) == str(mail_id):
-                        meta[field] = value
-                        with open(path, "w", encoding="utf-8") as f:
-                            json.dump(meta, f, ensure_ascii=False)
-                        return
-                except Exception: pass
+        for d in self._all_file_dirs(folder_id):
+            if not os.path.isdir(d): continue
+            for fn in os.listdir(d):
+                if fn.endswith(".json"):
+                    path = os.path.join(d, fn)
+                    try:
+                        with open(path, encoding="utf-8") as f: meta = json.load(f)
+                        if str(meta.get("id")) == str(mail_id):
+                            meta[field] = value
+                            with open(path, "w", encoding="utf-8") as f:
+                                json.dump(meta, f, ensure_ascii=False)
+                            return
+                    except Exception: pass
 
     def _delete_mail_file(self, mail_id, folder_id: int):
-        d = self._mail_file_dir(folder_id)
-        for fn in list(os.listdir(d)):
-            if fn.endswith(".json"):
-                path = os.path.join(d, fn)
-                try:
-                    with open(path, encoding="utf-8") as f: meta = json.load(f)
-                    if str(meta.get("id")) == str(mail_id):
-                        os.remove(path)
-                        eml = path.replace(".json", ".eml")
-                        if os.path.exists(eml): os.remove(eml)
-                        return
-                except Exception: pass
+        for d in self._all_file_dirs(folder_id):
+            if not os.path.isdir(d): continue
+            for fn in list(os.listdir(d)):
+                if fn.endswith(".json"):
+                    path = os.path.join(d, fn)
+                    try:
+                        with open(path, encoding="utf-8") as f: meta = json.load(f)
+                        if str(meta.get("id")) == str(mail_id):
+                            os.remove(path)
+                            eml = path.replace(".json", ".eml")
+                            if os.path.exists(eml): os.remove(eml)
+                            return
+                    except Exception: pass
 
     def _move_mail_file(self, mail_id, src_fid: int, tgt_fid: int):
         if not src_fid: return
         import shutil
-        sd = self._mail_file_dir(src_fid)
         td = self._mail_file_dir(tgt_fid)
-        for fn in list(os.listdir(sd)):
-            if fn.endswith(".json"):
-                path = os.path.join(sd, fn)
-                try:
-                    with open(path, encoding="utf-8") as f: meta = json.load(f)
-                    if str(meta.get("id")) == str(mail_id):
-                        meta["folder_id"] = tgt_fid
-                        shutil.move(path, os.path.join(td, fn))
-                        eml = path.replace(".json", ".eml")
-                        if os.path.exists(eml):
-                            shutil.move(eml, os.path.join(td, os.path.basename(eml)))
-                        return
-                except Exception: pass
+        for sd in self._all_file_dirs(src_fid):
+            if not os.path.isdir(sd): continue
+            for fn in list(os.listdir(sd)):
+                if fn.endswith(".json"):
+                    path = os.path.join(sd, fn)
+                    try:
+                        with open(path, encoding="utf-8") as f: meta = json.load(f)
+                        if str(meta.get("id")) == str(mail_id):
+                            meta["folder_id"] = tgt_fid
+                            shutil.move(path, os.path.join(td, fn))
+                            eml = path.replace(".json", ".eml")
+                            if os.path.exists(eml):
+                                shutil.move(eml, os.path.join(td, os.path.basename(eml)))
+                            return
+                    except Exception: pass
 
     @staticmethod
     def _parse_eml_body(content: str) -> str:
@@ -1273,18 +1331,90 @@ class DatabaseManager:
     def save_account(self, data: dict) -> int:
         conn = self._get_accounts_conn()
         if data.get("id"):
+            # Bestehendes Konto aktualisieren
             conn.execute("""UPDATE accounts SET name=:name,email=:email,protocol=:protocol,
                 in_host=:in_host,in_port=:in_port,in_ssl=:in_ssl,
                 out_host=:out_host,out_port=:out_port,out_ssl=:out_ssl,
                 username=:username,password=:password WHERE id=:id""", data)
-            conn.commit(); return data["id"]
+            conn.commit()
+            # Postfach-Anzeigenamen synchronisieren
+            sc = self._get_structure_conn()
+            sc.execute("UPDATE mailboxes SET name=?, email=? WHERE account_id=?",
+                       (data["name"], data["email"], data["id"]))
+            sc.commit()
+            return data["id"]
+
+        # Neues Konto anlegen
         cur = conn.execute("""INSERT INTO accounts
             (name,email,protocol,in_host,in_port,in_ssl,out_host,out_port,out_ssl,username,password)
             VALUES (:name,:email,:protocol,:in_host,:in_port,:in_ssl,
                     :out_host,:out_port,:out_ssl,:username,:password)""", data)
-        conn.commit(); return cur.lastrowid
+        conn.commit()
+        account_id = cur.lastrowid
+
+        # Postfach + IMAP-Standardordner in structure.db anlegen
+        sc = self._get_structure_conn()
+        sc.execute("INSERT INTO mailboxes (account_id,name,email) VALUES (?,?,?)",
+                   (account_id, data["name"], data["email"]))
+        mb_id = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        imap_folders = [
+            ("Posteingang", "inbox"),  ("Gesendet",  "sent"),
+            ("Entwürfe",    "drafts"), ("Papierkorb","trash"),
+            ("Spam",        "spam"),   ("Archiv",    "archive"),
+        ]
+        for fname, ftype in imap_folders:
+            sc.execute(
+                "INSERT INTO folders (mailbox_id,parent_id,name,folder_type,unread) "
+                "VALUES (?,NULL,?,?,0)",
+                (mb_id, fname, ftype)
+            )
+        sc.commit()
+        return account_id
 
     def delete_account(self, account_id: int):
+        """Löscht Konto aus accounts.db und alle zugehörigen Daten aus structure.db."""
+        # 1. Mails löschen (aus dem aktiven Backend)
+        sc   = self._get_structure_conn()
+        mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
+
+        # Alle Ordner-IDs für dieses Konto ermitteln
+        folder_ids = [row[0] for row in sc.execute(
+            "SELECT f.id FROM folders f "
+            "JOIN mailboxes mb ON f.mailbox_id=mb.id "
+            "WHERE mb.account_id=?", (account_id,)
+        ).fetchall()]
+
+        if mode == STORAGE_SQLITE_ONE:
+            for fid in folder_ids:
+                sc.execute("DELETE FROM mails WHERE folder_id=?", (fid,))
+            sc.commit()
+        elif mode == STORAGE_SQLITE_PER_ACCOUNT:
+            db_file = os.path.join(self.data_dir, f"mailstore_{account_id}.db")
+            if account_id in self._per_account_conns:
+                try: self._per_account_conns[account_id].close()
+                except Exception: pass
+                del self._per_account_conns[account_id]
+            if os.path.exists(db_file):
+                try: os.remove(db_file)
+                except OSError: pass
+        elif mode == STORAGE_FILES:
+            import shutil
+            for fid in folder_ids:
+                for d in self._all_file_dirs(fid):
+                    if os.path.isdir(d):
+                        shutil.rmtree(d, ignore_errors=True)
+
+        # 2. Ordner und Postfach aus structure.db entfernen
+        mb_ids = [row[0] for row in sc.execute(
+            "SELECT id FROM mailboxes WHERE account_id=?", (account_id,)
+        ).fetchall()]
+        for mb_id in mb_ids:
+            sc.execute("DELETE FROM folders WHERE mailbox_id=?", (mb_id,))
+        sc.execute("DELETE FROM mailboxes WHERE account_id=?", (account_id,))
+        sc.commit()
+
+        # 3. Konto-Datensatz löschen
         self._get_accounts_conn().execute("DELETE FROM accounts WHERE id=?", (account_id,))
         self._get_accounts_conn().commit()
 

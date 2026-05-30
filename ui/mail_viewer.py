@@ -129,7 +129,6 @@ class MailViewerFrame(wx.Frame):
         panel.SetSizer(outer)
 
         # Events
-        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
         self.btn_toggle.Bind(wx.EVT_BUTTON,  self._on_toggle_html)
         btn_reply.Bind(wx.EVT_BUTTON,   self._on_reply)
         btn_forward.Bind(wx.EVT_BUTTON, self._on_forward)
@@ -142,6 +141,13 @@ class MailViewerFrame(wx.Frame):
             (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, id_esc),
         ]))
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), id=id_esc)
+
+        # EINEN kombinierten EVT_CHAR_HOOK am Frame (Tab + Escape)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
+        # Direkt auf _book und _html_widget binden – WebView leitet Frame-Events
+        # nicht immer weiter, daher zusätzliche direkte Bindung notwendig
+        self._book.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
+        self._html_widget.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
 
         # Tab-Felder (für Screenreader-Navigation)
         self._tab_fields = [
@@ -279,17 +285,32 @@ class MailViewerFrame(wx.Frame):
     def _on_toggle_html(self, event):
         self._switch_mode(not self._html_mode)
 
-    def _on_char_hook(self, event: wx.KeyEvent):
-        if event.GetKeyCode() != wx.WXK_TAB:
-            event.Skip(); return
-        focused = self.FindFocus()
-        fields  = self._tab_fields
-        if focused not in fields:
-            event.Skip(); return
-        idx      = fields.index(focused)
-        shift    = event.ShiftDown()
-        next_idx = (idx - 1) % len(fields) if shift else (idx + 1) % len(fields)
-        fields[next_idx].SetFocus()
+    def _on_all_keys(self, event: wx.KeyEvent):
+        """
+        Kombinierter Key-Handler für das gesamte Viewer-Fenster.
+        Gebunden an Frame + _book + _html_widget, damit ESC auch aus
+        wx.html2.WebView heraus funktioniert.
+
+        ESC  → Fenster schließen
+        Tab  → Header-Felder navigieren (nur wenn Fokus in _tab_fields)
+        """
+        key = event.GetKeyCode()
+
+        if key == wx.WXK_ESCAPE:
+            self.Close()
+            return  # kein Skip → ESC wird nicht weitergegeben
+
+        if key == wx.WXK_TAB:
+            focused = self.FindFocus()
+            fields  = self._tab_fields
+            if focused in fields:
+                shift    = event.ShiftDown()
+                idx      = fields.index(focused)
+                next_idx = (idx - 1) % len(fields) if shift else (idx + 1) % len(fields)
+                fields[next_idx].SetFocus()
+                return  # kein Skip → kein Standard-Tab-Sprung
+
+        event.Skip()
 
     # ------------------------------------------------------------------ #
     #  Anhänge                                                            #
