@@ -242,3 +242,317 @@ class AppController:
         result = self.db.copy_mail(mail_id, target_folder_id, source_folder_id)
         self.db.update_folder_unread(target_folder_id)
         return result
+
+    # ------------------------------------------------------------------ #
+    #  Protokolle                                                         #
+    # ------------------------------------------------------------------ #
+
+    def fetch_new_mails(self, account_id: int = None, progress_cb=None) -> int:
+        """
+        Ruft neue Mails per IMAP oder POP3 ab.
+        Gibt die Anzahl der neu abgerufenen Mails zurück.
+        Raises RuntimeError bei Verbindungsfehlern.
+        """
+        accounts = [self.db.get_account(account_id)] if account_id else self.db.get_accounts()
+        total    = 0
+
+        for acc in accounts:
+            if not acc: continue
+            acc = dict(acc)
+            proto = acc.get("protocol", "IMAP").upper()
+            if proto == "LOCAL": continue
+            if not acc.get("in_host"): continue
+
+            if progress_cb:
+                progress_cb(f"Verbinde mit {acc['in_host']}…")
+
+            try:
+                if proto == "POP3":
+                    total += self._fetch_pop3(acc, progress_cb)
+                else:  # IMAP (Standard)
+                    total += self._fetch_imap(acc, progress_cb)
+            except Exception as e:
+                if progress_cb:
+                    progress_cb(f"Fehler ({acc['name']}): {e}")
+
+        return total
+
+    def _fetch_imap(self, acc: dict, progress_cb=None) -> int:
+        from protocols.imap_handler import IMAPHandler
+
+        handler = IMAPHandler(
+            host=acc["in_host"], port=int(acc["in_port"] or 993),
+            username=acc["username"] or acc["email"],
+            password=acc["password"] or "",
+            use_ssl=bool(acc.get("in_ssl", 1)),
+        )
+
+        count = 0
+        with handler:
+            # Server-Ordner abrufen und in DB synchronisieren
+            server_folders = handler.list_folders()
+            folder_map     = self._sync_imap_folders(acc, server_folders)
+
+            for folder_info in server_folders:
+                if "\\Noselect" in folder_info.get("flags", []):
+                    continue
+                imap_path = folder_info["path"]
+                folder_id = folder_map.get(imap_path)
+                if not folder_id:
+                    continue
+
+                if progress_cb:
+                    progress_cb(f"Ordner: {folder_info['name']}…")
+
+                # Bereits bekannte UIDs
+                known = self._get_known_uids(folder_id)
+                new_mails = handler.fetch_new_mails(imap_path, known_uids=known)
+
+                for m in new_mails:
+                    m["folder_id"] = folder_id
+                    self.db.insert_mail(folder_id, m)
+                    count += 1
+
+                if new_mails:
+                    self.db.update_folder_unread(folder_id)
+
+        return count
+
+    def _fetch_pop3(self, acc: dict, progress_cb=None) -> int:
+        from protocols.pop3_smtp_handler import POP3Handler
+
+        handler = POP3Handler(
+            host=acc["in_host"], port=int(acc["in_port"] or 995),
+            username=acc["username"] or acc["email"],
+            password=acc["password"] or "",
+            use_ssl=bool(acc.get("in_ssl", 1)),
+        )
+
+        # Posteingang des Kontos finden
+        inbox_id = self._get_inbox_folder_id(acc["id"])
+        if not inbox_id:
+            return 0
+
+        known = self._get_known_uids(inbox_id)
+        count = 0
+        with handler:
+            if progress_cb:
+                progress_cb(f"Lade Mails per POP3…")
+            new_mails = handler.fetch_new_mails(known_uids=known)
+            for m in new_mails:
+                m["folder_id"] = inbox_id
+                self.db.insert_mail(inbox_id, m)
+                count += 1
+        if count:
+            self.db.update_folder_unread(inbox_id)
+        return count
+
+    def send_outbox(self, progress_cb=None) -> int:
+        """
+        Sendet alle Mails aus dem Postausgang (Lokale Ordner → Postausgang).
+        Erfolgreich gesendete Mails werden in Gesendet des jeweiligen Kontos verschoben.
+        Gibt Anzahl gesendeter Mails zurück.
+        """
+        from protocols.pop3_smtp_handler import SMTPHandler
+        from protocols.imap_handler import IMAPHandler
+
+        outbox_id = self._get_outbox_folder_id()
+        if not outbox_id:
+            return 0
+
+        mails = self.db.get_mails(outbox_id)
+        if not mails:
+            return 0
+
+        sent_count = 0
+        for mail in mails:
+            m = dict(mail)
+            # Konto aus der From-Adresse ermitteln
+            acc = self._find_account_by_email(m.get("sender", ""))
+            if not acc:
+                continue
+
+            proto = acc.get("protocol", "IMAP").upper()
+            if proto == "LOCAL":
+                continue
+
+            try:
+                to_list = [a.strip() for a in (m.get("recipients") or "").split(",") if a.strip()]
+                cc_list = [a.strip() for a in (m.get("cc") or "").split(",") if a.strip()]
+
+                smtp = SMTPHandler(
+                    host=acc["out_host"], port=int(acc["out_port"] or 587),
+                    username=acc["username"] or acc["email"],
+                    password=acc["password"] or "",
+                    use_ssl=bool(acc.get("out_ssl", 1)),
+                )
+                if progress_cb:
+                    progress_cb(f"Sende an {m.get('recipients', '')}…")
+
+                raw_bytes = smtp.send(
+                    from_addr=m.get("sender", acc["email"]),
+                    to_addrs=to_list,
+                    subject=m.get("subject", ""),
+                    body_text=m.get("body_text", ""),
+                    body_html=m.get("body_html", ""),
+                    cc=cc_list,
+                )
+
+                # In Gesendet-Ordner verschieben
+                sent_id = self._get_sent_folder_id(acc["id"])
+                if sent_id:
+                    self.db.move_mail(m["id"], sent_id, source_folder_id=outbox_id)
+                    self.db.update_folder_unread(outbox_id)
+
+                    # Optional: auf IMAP-Server in Gesendet ablegen
+                    if proto == "IMAP" and acc.get("in_host"):
+                        try:
+                            imap = IMAPHandler(
+                                host=acc["in_host"], port=int(acc["in_port"] or 993),
+                                username=acc["username"] or acc["email"],
+                                password=acc["password"] or "",
+                                use_ssl=bool(acc.get("in_ssl", 1)),
+                            )
+                            with imap:
+                                # Gesendet-Pfad auf dem IMAP-Server suchen
+                                for f in imap.list_folders():
+                                    if f.get("name", "").lower() in ("sent", "gesendet", "sent items"):
+                                        imap.append_mail(f["path"], raw_bytes, "\\Seen")
+                                        break
+                        except Exception:
+                            pass  # IMAP-Append optional
+
+                sent_count += 1
+
+            except RuntimeError as e:
+                if progress_cb:
+                    progress_cb(f"Fehler: {e}")
+
+        return sent_count
+
+    # ------------------------------------------------------------------ #
+    #  Hilfsmethoden Protokolle                                           #
+    # ------------------------------------------------------------------ #
+
+    def _sync_imap_folders(self, acc: dict, server_folders: list) -> dict:
+        """
+        Synchronisiert IMAP-Server-Ordner mit der lokalen DB.
+        Gibt {imap_path: folder_id} zurück.
+        """
+        sc = self.db._get_structure_conn()
+        mb_row = sc.execute(
+            "SELECT id FROM mailboxes WHERE account_id=?", (acc["id"],)
+        ).fetchone()
+        if not mb_row:
+            return {}
+        mb_id = mb_row[0]
+
+        existing = {
+            r["imap_path"]: r["id"]
+            for r in sc.execute(
+                "SELECT id, imap_path FROM folders WHERE mailbox_id=? AND imap_path IS NOT NULL",
+                (mb_id,)
+            ).fetchall()
+            if r["imap_path"]
+        }
+
+        folder_map = {}
+        for sf in server_folders:
+            path = sf["path"]
+            if path in existing:
+                folder_map[path] = existing[path]
+            else:
+                # Ordner neu anlegen
+                ftype = self._guess_folder_type(sf["name"])
+                sc.execute(
+                    "INSERT INTO folders (mailbox_id, parent_id, name, folder_type, imap_path, unread) "
+                    "VALUES (?, NULL, ?, ?, ?, 0)",
+                    (mb_id, sf["name"], ftype, path)
+                )
+                folder_map[path] = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
+        sc.commit()
+        return folder_map
+
+    @staticmethod
+    def _guess_folder_type(name: str) -> str:
+        n = name.lower()
+        if n in ("inbox", "posteingang"):               return "inbox"
+        if n in ("sent", "gesendet", "sent items"):     return "sent"
+        if n in ("drafts", "entwürfe", "draft"):        return "drafts"
+        if n in ("trash", "papierkorb", "deleted items","deleted"): return "trash"
+        if n in ("spam", "junk", "junk mail"):          return "spam"
+        if n in ("archive", "archiv"):                  return "archive"
+        return "custom"
+
+    def _get_known_uids(self, folder_id: int) -> set:
+        """Gibt alle bekannten UIDs eines Ordners zurück."""
+        try:
+            mails = self.db.get_mails(folder_id)
+            return {str(dict(m).get("uid", "")) for m in mails if dict(m).get("uid")}
+        except Exception:
+            return set()
+
+    def _get_inbox_folder_id(self, account_id: int) -> int | None:
+        sc = self.db._get_structure_conn()
+        row = sc.execute(
+            "SELECT f.id FROM folders f JOIN mailboxes mb ON f.mailbox_id=mb.id "
+            "WHERE mb.account_id=? AND f.folder_type='inbox'", (account_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def _get_sent_folder_id(self, account_id: int) -> int | None:
+        sc = self.db._get_structure_conn()
+        row = sc.execute(
+            "SELECT f.id FROM folders f JOIN mailboxes mb ON f.mailbox_id=mb.id "
+            "WHERE mb.account_id=? AND f.folder_type='sent'", (account_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def _get_outbox_folder_id(self) -> int | None:
+        """Gibt die ID des Postausgangs in Lokale Ordner zurück."""
+        return self._get_local_folder_by_type("outbox")
+
+    def _get_local_folder_by_type(self, folder_type: str) -> int | None:
+        """Findet einen Ordner in LOCAL-Konten per Typ (zwei-Schritt, kein Cross-DB-JOIN)."""
+        acc_conn  = self.db._get_accounts_conn()
+        local_ids = [r[0] for r in acc_conn.execute(
+            "SELECT id FROM accounts WHERE protocol='LOCAL'"
+        ).fetchall()]
+        if not local_ids:
+            return None
+        sc  = self.db._get_structure_conn()
+        ph  = ",".join("?" for _ in local_ids)
+        row = sc.execute(
+            f"SELECT f.id FROM folders f "
+            f"JOIN mailboxes mb ON f.mailbox_id=mb.id "
+            f"WHERE mb.account_id IN ({ph}) AND f.folder_type=?",
+            local_ids + [folder_type]
+        ).fetchone()
+        return row[0] if row else None
+
+    def _find_account_by_email(self, email_addr: str) -> dict | None:
+        """Findet ein Konto anhand der E-Mail-Adresse im From-Feld."""
+        for acc in self.db.get_accounts():
+            a = dict(acc)
+            if a.get("email", "").lower() in email_addr.lower():
+                return a
+        return None
+
+    def create_welcome_mail(self, inbox_folder_id: int):
+        """Legt die Willkommens-Nachricht im Posteingang an."""
+        from core.i18n import tr
+        from datetime import datetime
+        self.db.insert_mail(inbox_folder_id, {
+            "subject":      tr("welcome_subject"),
+            "sender":       tr("welcome_sender"),
+            "sender_name":  tr("welcome_sender_name"),
+            "recipients":   "",
+            "date":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "body_text":    tr("welcome_body"),
+            "body_html":    "",
+            "is_read":      0,
+            "is_flagged":   0,
+            "has_attach":   0,
+            "size":         len(tr("welcome_body")),
+        })
+        self.db.update_folder_unread(inbox_folder_id)

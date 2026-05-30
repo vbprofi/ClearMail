@@ -13,7 +13,7 @@ from ui.search_dialog import SearchDialog
 from ui.dialogs import (
     AccountDialog, SettingsDialog, PrintPreviewDialog,
     PGPDialog, AddonManagerDialog, AboutDialog, ComposeDialog,
-    SetupDialog, FolderPickerDialog
+    SetupDialog, FolderPickerDialog, AuthCredentialsDialog
 )
 
 
@@ -88,6 +88,7 @@ class MainFrame(wx.Frame):
         self.mi_del_account  = mac.Append(wx.ID_ANY, tr("menu_accounts_delete"))
         mac.AppendSeparator()
         self.mi_fetch        = mac.Append(wx.ID_ANY, tr("menu_accounts_fetch"))
+        self.mi_send_outbox  = mac.Append(wx.ID_ANY, tr("menu_accounts_send_outbox"))
         mb.Append(mac, tr("menu_accounts"))
 
         mx = wx.Menu()
@@ -157,6 +158,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_edit_account, self.mi_edit_account)
         self.Bind(wx.EVT_MENU, self._on_del_account,  self.mi_del_account)
         self.Bind(wx.EVT_MENU, self._on_fetch,        self.mi_fetch)
+        self.Bind(wx.EVT_MENU, self._on_send_outbox,  self.mi_send_outbox)
         self.Bind(wx.EVT_MENU, self._on_settings,     self.mi_settings)
         self.Bind(wx.EVT_MENU, self._on_pgp,          self.mi_pgp)
         self.Bind(wx.EVT_MENU, self._on_addons,       self.mi_addons)
@@ -496,8 +498,115 @@ class MainFrame(wx.Frame):
                     self.mail_preview_panel.clear()
 
     def _on_fetch(self, event):
-        wx.MessageBox(tr("fetch_not_impl"), tr("fetch_not_impl_title"),
-                      wx.OK | wx.ICON_INFORMATION, self)
+        """Neue Nachrichten abrufen – läuft in Worker-Thread."""
+        accs = [a for a in self.controller.get_accounts()
+                if dict(a).get("protocol", "LOCAL") != "LOCAL"]
+        if not accs:
+            wx.MessageBox(tr("imap_no_account"), tr("hint_title"),
+                          wx.OK | wx.ICON_INFORMATION, self)
+            return
+        self.status_bar.SetStatusText(tr("fetch_running"), 0)
+        self.mi_fetch.Enable(False)
+
+        from core.protocol_runner import ProtocolWorker
+
+        def _done(count):
+            self.mi_fetch.Enable(True)
+            self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
+            # Baumstruktur mit neuen IMAP-Ordnern aktualisieren
+            self.folder_panel.reload()
+            # Mailliste aktualisieren
+            if self._selected_folder_id:
+                mails = self.controller.get_mails(self._selected_folder_id)
+                self.mail_list_panel.load_mails(mails)
+                if self._selected_folder_id:
+                    self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+            # Letzten Ordner wiederherstellen falls noch keiner ausgewählt
+            if not self._selected_folder_id:
+                self._restore_last_folder()
+
+        def _error(msg, is_auth):
+            self.mi_fetch.Enable(True)
+            self.status_bar.SetStatusText("", 0)
+            if is_auth:
+                self._handle_auth_error(msg, accs)
+            else:
+                wx.MessageBox(tr("imap_fetch_err", error=msg),
+                              tr("error_title"), wx.OK | wx.ICON_ERROR, self)
+
+        def _progress(msg):
+            self.status_bar.SetStatusText(msg, 0)
+
+        ProtocolWorker(
+            fn=self.controller.fetch_new_mails,
+            on_progress=_progress,
+            on_done=_done,
+            on_error=_error,
+        ).start()
+
+    def _on_send_outbox(self, event):
+        """Postausgang senden – läuft in Worker-Thread."""
+        self.status_bar.SetStatusText(tr("send_running"), 0)
+        self.mi_send_outbox.Enable(False)
+
+        from core.protocol_runner import ProtocolWorker
+
+        def _done(count):
+            self.mi_send_outbox.Enable(True)
+            self.status_bar.SetStatusText(
+                tr("outbox_empty") if count == 0 else tr("smtp_send_ok", count=count), 0)
+            self.folder_panel.reload()
+            if self._selected_folder_id:
+                mails = self.controller.get_mails(self._selected_folder_id)
+                self.mail_list_panel.load_mails(mails)
+
+        def _error(msg, is_auth):
+            self.mi_send_outbox.Enable(True)
+            self.status_bar.SetStatusText("", 0)
+            accs = [a for a in self.controller.get_accounts()
+                    if dict(a).get("protocol", "LOCAL") != "LOCAL"]
+            if is_auth:
+                self._handle_auth_error(msg, accs)
+            else:
+                wx.MessageBox(tr("smtp_send_err", error=msg),
+                              tr("error_title"), wx.OK | wx.ICON_ERROR, self)
+
+        def _progress(msg):
+            self.status_bar.SetStatusText(msg, 0)
+
+        ProtocolWorker(
+            fn=self.controller.send_outbox,
+            on_progress=_progress,
+            on_done=_done,
+            on_error=_error,
+        ).start()
+
+    def _handle_auth_error(self, error_msg: str, accs: list):
+        """
+        Zeigt AuthCredentialsDialog an.
+        Wenn der Nutzer neue Daten eingibt und bestätigt,
+        werden sie gespeichert und der Fetch-Vorgang wiederholt.
+        """
+        from ui.dialogs import AuthCredentialsDialog
+        # Konto aus der Fehlermeldung heraussuchen (oder erstes Konto nehmen)
+        acc = None
+        for a in accs:
+            a = dict(a)
+            if a.get("in_host", "") in error_msg or a.get("out_host", "") in error_msg:
+                acc = a
+                break
+        if not acc and accs:
+            acc = dict(accs[0])
+        if not acc:
+            return
+        host = acc.get("in_host") or acc.get("out_host") or ""
+        dlg = AuthCredentialsDialog(self, self.controller, acc["id"], host)
+        if dlg.ShowModal() == wx.ID_OK:
+            wx.MessageBox(tr("auth_save_ok"), tr("hint_title"),
+                          wx.OK | wx.ICON_INFORMATION, self)
+            # Erneut versuchen mit neuen Daten
+            self._on_fetch(None)
+        dlg.Destroy()
 
     # ------------------------------------------------------------------ #
     #  Extras                                                             #
@@ -648,15 +757,21 @@ class MainFrame(wx.Frame):
             viewer.Show()
 
     def _restore_last_folder(self):
-        """Stellt den zuletzt ausgewählten Ordner beim Programmstart wieder her."""
+        """Stellt den zuletzt ausgewählten Ordner wieder her.
+        Fallback: erster Posteingang in der Baumstruktur."""
         last_id = self.controller.get_setting("last_folder_id", "")
-        if not last_id:
-            return
-        try:
-            target_id = int(last_id)
-        except ValueError:
-            return
-        self.folder_panel.select_folder_by_id(target_id)
+        if last_id:
+            try:
+                self.folder_panel.select_folder_by_id(int(last_id))
+                return
+            except (ValueError, Exception):
+                pass
+        # Fallback: ersten Posteingang auswählen
+        for mb in self.controller.get_mailboxes():
+            for f in self.controller.get_folders(mb["id"]):
+                if dict(f).get("folder_type") == "inbox":
+                    self.folder_panel.select_folder_by_id(f["id"])
+                    return
 
     def set_status(self, text: str, pane: int = 0):
         self.status_bar.SetStatusText(text, pane)

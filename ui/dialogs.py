@@ -245,6 +245,37 @@ class SettingsDialog(wx.Dialog):
         pg4.SetSizer(self._w(gs4))
         nb.AddPage(pg4, tr("settings_tab_storage"))
 
+        # ---- Developer ----
+        import os as _os
+        pg5 = wx.Panel(nb)
+        gs5 = wx.FlexGridSizer(cols=2, vgap=10, hgap=8)
+        gs5.AddGrowableCol(1)
+        gs5.Add(wx.StaticText(pg5, label=""), 0)
+        self.chk_dev_log = wx.CheckBox(pg5, label=tr("settings_dev_logging"))
+        self.chk_dev_log.SetName(tr("settings_dev_logging"))
+        gs5.Add(self.chk_dev_log, 0)
+
+        lbl_log_path = wx.StaticText(pg5, label=tr("settings_dev_log_path"))
+        gs5.Add(lbl_log_path, 0, wx.ALIGN_CENTER_VERTICAL)
+        data_dir = _os.path.join(_os.path.expanduser("~"), ".mailclient")
+        self.txt_log_path = wx.TextCtrl(pg5)
+        self.txt_log_path.SetValue(_os.path.join(data_dir, "protocol.log"))
+        self.txt_log_path.SetName(tr("settings_dev_log_path"))
+        gs5.Add(self.txt_log_path, 1, wx.EXPAND)
+
+        gs5.Add(wx.StaticText(pg5, label=""), 0)
+        btn_row5 = wx.BoxSizer(wx.HORIZONTAL)
+        btn_open_log  = wx.Button(pg5, label=tr("settings_dev_open_log"))
+        btn_clear_log = wx.Button(pg5, label=tr("settings_dev_clear_log"))
+        btn_open_log.Bind(wx.EVT_BUTTON, self._on_open_log)
+        btn_clear_log.Bind(wx.EVT_BUTTON, self._on_clear_log)
+        btn_row5.Add(btn_open_log, 0, wx.RIGHT, 6)
+        btn_row5.Add(btn_clear_log)
+        gs5.Add(btn_row5, 0)
+
+        pg5.SetSizer(self._w(gs5))
+        nb.AddPage(pg5, tr("settings_tab_developer"))
+
         outer.Add(nb, 1, wx.EXPAND | wx.ALL, 6)
         bs = wx.StdDialogButtonSizer()
         btn_ok     = wx.Button(panel, wx.ID_OK,     tr("dlg_save"))
@@ -260,6 +291,25 @@ class SettingsDialog(wx.Dialog):
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         return s
+
+    def _on_open_log(self, event):
+        import os, sys, subprocess
+        path = self.txt_log_path.GetValue().strip()
+        if not os.path.exists(path):
+            open(path, "w").close()
+        if sys.platform == "win32":
+            os.startfile(path)
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    def _on_clear_log(self, event):
+        path = self.txt_log_path.GetValue().strip()
+        try:
+            open(path, "w").close()
+            wx.MessageBox(tr("settings_dev_clear_log") + " OK",
+                          tr("hint_title"), wx.OK, self)
+        except Exception as e:
+            wx.MessageBox(str(e), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
     def _load(self):
         g = self.controller.get_setting
@@ -278,6 +328,10 @@ class SettingsDialog(wx.Dialog):
         cur_storage = g("mail_storage", STORAGE_SQLITE_ONE)
         idx_st = self._storage_codes.index(cur_storage) if cur_storage in self._storage_codes else 0
         self.cho_storage.SetSelection(idx_st)
+        self.chk_dev_log.SetValue(g("dev_logging", "0") == "1")
+        import os as _os2
+        log_p = g("dev_log_path", _os2.path.join(_os2.path.expanduser("~"), ".mailclient", "protocol.log"))
+        self.txt_log_path.SetValue(log_p)
 
     def _on_save(self, event):
         s   = self.controller.set_setting
@@ -294,6 +348,16 @@ class SettingsDialog(wx.Dialog):
         idx_lang = self.cho_lang.GetSelection()
         if 0 <= idx_lang < len(self._lang_codes):
             s("language", self._lang_codes[idx_lang])
+
+        # Developer
+        dev_log = self.chk_dev_log.GetValue()
+        s("dev_logging",  "1" if dev_log else "0")
+        s("dev_log_path", self.txt_log_path.GetValue().strip())
+        from core.protocol_runner import setup_logging, disable_logging
+        if dev_log:
+            setup_logging(self.txt_log_path.GetValue().strip())
+        else:
+            disable_logging()
 
         # Storage-Modus prüfen
         idx_st   = self.cho_storage.GetSelection()
@@ -573,9 +637,12 @@ class ComposeDialog(wx.Dialog):
     def __init__(self, parent, controller, reply_to=None, reply_all=False, forward=None):
         title = tr("compose_title_reply") if reply_to else (
                 tr("compose_title_forward") if forward else tr("compose_title_new"))
-        super().__init__(parent, title=title, size=(640, 520),
+        super().__init__(parent, title=title, size=(660, 600),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-        self.controller = controller
+        self.controller    = controller
+        self._attachments  = []   # Liste von Dateipfaden
+        self._accs         = [dict(a) for a in self.controller.get_accounts()
+                              if dict(a).get("protocol", "IMAP") != "LOCAL"]
         self._build_ui()
         self._prefill(reply_to, reply_all, forward)
         self.Centre()
@@ -585,9 +652,8 @@ class ComposeDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         gs    = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
         gs.AddGrowableCol(1)
-        accs         = [a for a in self.controller.get_accounts()
-                        if dict(a).get("protocol", "IMAP") != "LOCAL"]
-        from_choices = [f"{a['name']} <{a['email']}>" for a in accs] or ["(–)"]
+
+        from_choices = [f"{a['name']} <{a['email']}>" for a in self._accs] or ["(–)"]
         self.cho_from    = add_labeled_field(panel, gs, tr("compose_from"),
                                               lambda p: wx.Choice(p, choices=from_choices))
         self.cho_from.SetSelection(0)
@@ -599,16 +665,33 @@ class ComposeDialog(wx.Dialog):
         sizer.Add(wx.StaticText(panel, label=tr("compose_body")), 0, wx.LEFT | wx.TOP, 8)
         self.txt_body = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.BORDER_SUNKEN)
         self.txt_body.SetName(tr("compose_body"))
-        self.txt_body.SetMinSize((-1, 200))
+        self.txt_body.SetMinSize((-1, 160))
         sizer.Add(self.txt_body, 1, wx.EXPAND | wx.ALL, 8)
+
+        # ---- Anhang-Bereich ----
+        self.lbl_attach = wx.StaticText(panel, label=tr("compose_attach_empty"))
+        sizer.Add(self.lbl_attach, 0, wx.LEFT | wx.RIGHT, 8)
+        self.list_attach = wx.ListCtrl(
+            panel, style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL)
+        self.list_attach.SetName("Anhang-Liste")
+        self.list_attach.InsertColumn(0, "Dateiname", width=280)
+        self.list_attach.InsertColumn(1, "Größe",     width=80)
+        self.list_attach.SetMinSize((-1, 80))
+        sizer.Add(self.list_attach, 0, wx.EXPAND | wx.ALL, 8)
+
         row = wx.BoxSizer(wx.HORIZONTAL)
         btn_send   = wx.Button(panel, label=tr("compose_send"))
         btn_attach = wx.Button(panel, label=tr("compose_attach"))
+        btn_remove = wx.Button(panel, label=tr("compose_attach_remove"))
         btn_disc   = wx.Button(panel, wx.ID_CANCEL, tr("compose_discard"))
         btn_send.Bind(wx.EVT_BUTTON,   self._on_send)
         btn_attach.Bind(wx.EVT_BUTTON, self._on_attach)
-        row.Add(btn_send, 0, wx.RIGHT, 8);  row.Add(btn_attach, 0, wx.RIGHT, 8)
-        row.AddStretchSpacer();  row.Add(btn_disc)
+        btn_remove.Bind(wx.EVT_BUTTON, self._on_remove_attach)
+        row.Add(btn_send, 0, wx.RIGHT, 8)
+        row.Add(btn_attach, 0, wx.RIGHT, 4)
+        row.Add(btn_remove, 0, wx.RIGHT, 8)
+        row.AddStretchSpacer()
+        row.Add(btn_disc)
         sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
         panel.SetSizer(sizer)
         self.txt_to.SetFocus()
@@ -635,17 +718,103 @@ class ComposeDialog(wx.Dialog):
                 f"{tr('preview_from')} {forward.get('sender_name','')} <{forward.get('sender','')}>\n"
                 f"{forward.get('body_text','') or ''}")
 
-    def _on_send(self, event):
-        if not self.txt_to.GetValue().strip():
-            wx.MessageBox(tr("compose_err_no_to"), tr("error_title"), wx.OK | wx.ICON_WARNING, self)
-            return
-        wx.MessageBox(tr("compose_smtp_todo"), tr("hint_title"), wx.OK | wx.ICON_INFORMATION, self)
-
     def _on_attach(self, event):
         with wx.FileDialog(self, tr("attach_title"),
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as d:
-            if d.ShowModal() == wx.ID_OK:
-                wx.MessageBox(tr("attach_msg", count=len(d.GetPaths())), tr("hint_title"), wx.OK, self)
+            if d.ShowModal() != wx.ID_OK:
+                return
+            for path in d.GetPaths():
+                if path not in self._attachments:
+                    self._attachments.append(path)
+        self._refresh_attach_list()
+
+    def _on_remove_attach(self, event):
+        idx = self.list_attach.GetFirstSelected()
+        if 0 <= idx < len(self._attachments):
+            del self._attachments[idx]
+            self._refresh_attach_list()
+
+    def _refresh_attach_list(self):
+        self.list_attach.DeleteAllItems()
+        import os
+        for path in self._attachments:
+            size = os.path.getsize(path) if os.path.exists(path) else 0
+            sz   = (f"{size//1024} KB" if size >= 1024 else f"{size} B")
+            idx  = self.list_attach.InsertItem(
+                self.list_attach.GetItemCount(), os.path.basename(path))
+            self.list_attach.SetItem(idx, 1, sz)
+        count = len(self._attachments)
+        self.lbl_attach.SetLabel(
+            tr("compose_attach_list", count=count) if count
+            else tr("compose_attach_empty"))
+
+    def _on_send(self, event):
+        to_str = self.txt_to.GetValue().strip()
+        if not to_str:
+            wx.MessageBox(tr("compose_err_no_to"), tr("error_title"),
+                          wx.OK | wx.ICON_WARNING, self)
+            return
+
+        if not self._accs:
+            wx.MessageBox(tr("imap_no_account"), tr("hint_title"),
+                          wx.OK | wx.ICON_INFORMATION, self)
+            return
+
+        idx  = self.cho_from.GetSelection()
+        acc  = self._accs[idx] if 0 <= idx < len(self._accs) else self._accs[0]
+
+        # Mail zuerst im Postausgang (Lokale Ordner) speichern
+        outbox_id = self.controller._get_outbox_folder_id()
+        mail_data = {
+            "subject":    self.txt_subject.GetValue().strip(),
+            "sender":     acc["email"],
+            "sender_name":acc["name"],
+            "recipients": to_str,
+            "cc":         self.txt_cc.GetValue().strip(),
+            "body_text":  self.txt_body.GetValue(),
+            "body_html":  "",
+            "is_read":    1,
+            "has_attach": int(bool(self._attachments)),
+            "size":       len(self.txt_body.GetValue()),
+        }
+
+        # Sofort senden versuchen
+        try:
+            from protocols.pop3_smtp_handler import SMTPHandler
+            to_list = [a.strip() for a in to_str.split(",") if a.strip()]
+            cc_list = [a.strip() for a in self.txt_cc.GetValue().split(",") if a.strip()]
+            smtp = SMTPHandler(
+                host=acc["out_host"], port=int(acc.get("out_port") or 587),
+                username=acc.get("username") or acc["email"],
+                password=acc.get("password") or "",
+                use_ssl=bool(acc.get("out_ssl", 1)),
+            )
+            smtp.send(
+                from_addr=acc["email"],
+                to_addrs=to_list,
+                subject=mail_data["subject"],
+                body_text=mail_data["body_text"],
+                cc=cc_list,
+                attachments=self._attachments,
+            )
+            # Gesendet-Ordner
+            sent_id = self.controller._get_sent_folder_id(acc["id"])
+            if sent_id:
+                self.controller.db.insert_mail(sent_id, mail_data)
+            wx.MessageBox(tr("compose_send_ok"), tr("hint_title"),
+                          wx.OK | wx.ICON_INFORMATION, self)
+            self.EndModal(wx.ID_OK)
+
+        except RuntimeError as e:
+            # Senden fehlgeschlagen → in Postausgang ablegen
+            if outbox_id:
+                self.controller.db.insert_mail(outbox_id, mail_data)
+                wx.MessageBox(
+                    tr("compose_send_err", error=str(e)) + "\n\n" + tr("compose_saved_outbox"),
+                    tr("error_title"), wx.OK | wx.ICON_WARNING, self)
+            else:
+                wx.MessageBox(tr("compose_send_err", error=str(e)),
+                              tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
 
 # ================================================================== #
@@ -687,3 +856,86 @@ class SetupDialog(wx.Dialog):
 
 # Re-export FolderPickerDialog for import from dialogs
 from ui.folder_picker import FolderPickerDialog
+
+
+# ================================================================== #
+#  AuthCredentialsDialog – Zugangsdaten bei Auth-Fehler              #
+# ================================================================== #
+
+class AuthCredentialsDialog(wx.Dialog):
+    """
+    Wird angezeigt wenn eine IMAP/POP3/SMTP-Anmeldung fehlschlägt.
+    Erlaubt dem Nutzer Username und Passwort zu korrigieren.
+    Bei Erfolg werden die neuen Daten in der DB gespeichert.
+    """
+
+    def __init__(self, parent, controller, account_id: int, host: str):
+        super().__init__(parent,
+                         title=tr("auth_error_title"),
+                         size=(420, 260),
+                         style=wx.DEFAULT_DIALOG_STYLE)
+        self.controller = controller
+        self.account_id = account_id
+        self.host       = host
+        self._build_ui(host)
+        self.Centre()
+
+    def _build_ui(self, host: str):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        lbl = wx.StaticText(panel,
+            label=tr("auth_error_msg", host=host))
+        lbl.SetForegroundColour(wx.Colour(180, 0, 0))
+        sizer.Add(lbl, 0, wx.ALL, 12)
+
+        gs = wx.FlexGridSizer(cols=2, vgap=8, hgap=8)
+        gs.AddGrowableCol(1)
+
+        gs.Add(wx.StaticText(panel, label=tr("auth_new_username")),
+               0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_user = wx.TextCtrl(panel)
+        gs.Add(self.txt_user, 1, wx.EXPAND)
+
+        gs.Add(wx.StaticText(panel, label=tr("auth_new_password")),
+               0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_pass = wx.TextCtrl(panel, style=wx.TE_PASSWORD)
+        gs.Add(self.txt_pass, 1, wx.EXPAND)
+
+        sizer.Add(gs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+
+        # Aktuelle Daten vorladen
+        acc = self.controller.get_account(self.account_id)
+        if acc:
+            self.txt_user.SetValue(str(acc["username"] or acc["email"] or ""))
+
+        bs = wx.StdDialogButtonSizer()
+        btn_ok     = wx.Button(panel, wx.ID_OK,     tr("auth_retry"))
+        btn_cancel = wx.Button(panel, wx.ID_CANCEL, tr("dlg_cancel"))
+        btn_ok.SetDefault()
+        bs.AddButton(btn_ok); bs.AddButton(btn_cancel); bs.Realize()
+        sizer.Add(bs, 0, wx.EXPAND | wx.ALL, 12)
+
+        panel.SetSizer(sizer)
+        btn_ok.Bind(wx.EVT_BUTTON, self._on_ok)
+        self.txt_user.SetFocus()
+
+    def _on_ok(self, event):
+        username = self.txt_user.GetValue().strip()
+        password = self.txt_pass.GetValue()
+        if not username:
+            wx.MessageBox(tr("account_err_required"), tr("error_title"),
+                          wx.OK | wx.ICON_WARNING, self)
+            return
+        # Zugangsdaten in DB aktualisieren
+        acc = self.controller.get_account(self.account_id)
+        if acc:
+            data = dict(acc)
+            data["username"] = username
+            data["password"] = password
+            self.controller.save_account(data)
+        self.EndModal(wx.ID_OK)
+
+    def get_credentials(self):
+        """Gibt (username, password) zurück."""
+        return self.txt_user.GetValue().strip(), self.txt_pass.GetValue()
