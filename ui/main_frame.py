@@ -66,12 +66,23 @@ class MainFrame(wx.Frame):
         mv = wx.Menu()
         self.mi_refresh    = mv.Append(wx.ID_REFRESH, tr("menu_view_refresh"))
         mv.AppendSeparator()
-        self.mi_col_date   = mv.AppendCheckItem(wx.ID_ANY, tr("menu_view_col_date"))
-        self.mi_col_size   = mv.AppendCheckItem(wx.ID_ANY, tr("menu_view_col_size"))
-        self.mi_col_date.Check(True);  self.mi_col_size.Check(True)
+
+        # ---- Spalten anzeigen (Untermenü) ----
+        mc = wx.Menu()
+        def _col_item(label, checked=True):
+            mi = mc.AppendCheckItem(wx.ID_ANY, label)
+            mi.Check(checked); return mi
+        self.mi_col_flag    = _col_item(tr("menu_view_col_flag"),    True)
+        self.mi_col_status  = _col_item(tr("menu_view_col_status"),  True)
+        self.mi_col_from    = _col_item(tr("menu_view_col_from"),    True)
+        self.mi_col_subject = _col_item(tr("menu_view_col_subject"), True)
+        self.mi_col_date    = _col_item(tr("menu_view_col_date"),    True)
+        self.mi_col_size    = _col_item(tr("menu_view_col_size"),    True)
+        self.mi_col_attach  = _col_item(tr("menu_view_col_attach"),  True)
+        mv.AppendSubMenu(mc, tr("menu_view_columns"))
         mv.AppendSeparator()
 
-        # ---- Sortieren-Untermenü (Thunderbird-Stil) ----
+        # ---- Sortieren nach (Untermenü) ----
         ms = wx.Menu()
         # Sortierfelder
         self._sort_items = {}
@@ -208,6 +219,18 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda e: self._on_mark(False), self.mi_mark_unread)
         self.Bind(wx.EVT_MENU, self._on_flag,         self.mi_flag)
         self.Bind(wx.EVT_MENU, self._on_refresh,      self.mi_refresh)
+        # Spalten ein/ausblenden
+        for mi, col_name in [
+            (self.mi_col_flag,    "flag"),
+            (self.mi_col_status,  "status"),
+            (self.mi_col_from,    "from"),
+            (self.mi_col_subject, "subject"),
+            (self.mi_col_date,    "date"),
+            (self.mi_col_size,    "size"),
+            (self.mi_col_attach,  "attach"),
+        ]:
+            self.Bind(wx.EVT_MENU,
+                      lambda e, c=col_name: self._on_col_toggle(c), mi)
         self.Bind(wx.EVT_MENU, self._on_new_account,  self.mi_new_account)
         self.Bind(wx.EVT_MENU, self._on_edit_account, self.mi_edit_account)
         self.Bind(wx.EVT_MENU, self._on_del_account,  self.mi_del_account)
@@ -303,6 +326,9 @@ class MainFrame(wx.Frame):
             self._mark_read_timer = None
 
         self._selected_mail_id = mail_id
+        # Ausgewählte Mail persistent speichern (pro Ordner)
+        if self._selected_folder_id:
+            self.controller.set_setting(f"last_mail_{self._selected_folder_id}", str(mail_id))
         # get_mail OHNE automatisches Markieren als gelesen – das steuert der Timer
         mail = self.controller.db.get_mail(mail_id, self._selected_folder_id)
         if mail:
@@ -487,12 +513,66 @@ class MainFrame(wx.Frame):
         self.mail_list_panel._sort_asc = self.mi_sort_asc.IsChecked()
         self.mail_list_panel._apply_sort_to_data()
         self.mail_list_panel._rebuild_from_sorted_data()
+        self._save_sort_settings(sort_key, self.mi_sort_asc.IsChecked())
 
     def _on_sort_direction(self):
         """Richtungswechsel ohne Feldwechsel."""
         self.mail_list_panel._sort_asc = self.mi_sort_asc.IsChecked()
         self.mail_list_panel._apply_sort_to_data()
         self.mail_list_panel._rebuild_from_sorted_data()
+        # Aktives Feld ermitteln
+        for key, mi in self._sort_items.items():
+            if mi.IsChecked():
+                self._save_sort_settings(key, self.mi_sort_asc.IsChecked())
+                break
+
+    def _save_sort_settings(self, sort_key: str, asc: bool):
+        self.controller.set_setting("sort_field", sort_key)
+        self.controller.set_setting("sort_asc",   "1" if asc else "0")
+
+    def _restore_sort_settings(self):
+        """Sortierung aus DB wiederherstellen."""
+        from ui.mail_list_panel import COL_DATE, COL_FROM, COL_SUBJECT, COL_SIZE, COL_READ, COL_FLAG
+        col_map = {"date": COL_DATE,"from": COL_FROM,"subject": COL_SUBJECT,
+                   "size": COL_SIZE,"status": COL_READ,"flag": COL_FLAG,"attach": COL_SUBJECT}
+        sort_key = self.controller.get_setting("sort_field", "date")
+        sort_asc = self.controller.get_setting("sort_asc", "0") == "1"
+        # Menü-RadioItems setzen
+        if sort_key in self._sort_items:
+            self._sort_items[sort_key].Check(True)
+        if sort_asc:
+            self.mi_sort_asc.Check(True)
+        else:
+            self.mi_sort_desc.Check(True)
+        self.mail_list_panel._sort_col = col_map.get(sort_key, COL_DATE)
+        self.mail_list_panel._sort_asc = sort_asc
+
+    def _on_col_toggle(self, col_name: str):
+        """Spalte ein- oder ausblenden."""
+        from ui.mail_list_panel import COL_FLAG, COL_READ, COL_FROM, COL_SUBJECT, COL_DATE, COL_SIZE
+        col_map = {
+            "flag":    COL_FLAG,    "status":  COL_READ,
+            "from":    COL_FROM,    "subject": COL_SUBJECT,
+            "date":    COL_DATE,    "size":    COL_SIZE,
+            "attach":  COL_SUBJECT,
+        }
+        mi_map = {
+            "flag":    self.mi_col_flag,   "status":  self.mi_col_status,
+            "from":    self.mi_col_from,   "subject": self.mi_col_subject,
+            "date":    self.mi_col_date,   "size":    self.mi_col_size,
+            "attach":  self.mi_col_attach,
+        }
+        col_idx = col_map.get(col_name)
+        if col_idx is None: return
+        visible = mi_map[col_name].IsChecked()
+        lc = self.mail_list_panel.list_ctrl
+        if visible:
+            # Standardbreite wiederherstellen
+            widths = {COL_FLAG: 24, COL_READ: 60, COL_FROM: 180,
+                      COL_SUBJECT: 300, COL_DATE: 110, COL_SIZE: 65}
+            lc.SetColumnWidth(col_idx, widths.get(col_idx, 100))
+        else:
+            lc.SetColumnWidth(col_idx, 0)
 
     def _on_refresh(self, event):
         if self._selected_folder_id:
@@ -855,10 +935,15 @@ class MainFrame(wx.Frame):
     def _restore_last_folder(self):
         """Stellt den zuletzt ausgewählten Ordner wieder her.
         Fallback: erster Posteingang in der Baumstruktur."""
+        # Zuerst Sortierung wiederherstellen
+        self._restore_sort_settings()
+
         last_id = self.controller.get_setting("last_folder_id", "")
         if last_id:
             try:
                 self.folder_panel.select_folder_by_id(int(last_id))
+                # Letzte ausgewählte Mail in diesem Ordner wiederherstellen
+                wx.CallAfter(self._restore_last_mail, int(last_id))
                 return
             except (ValueError, Exception):
                 pass
@@ -867,7 +952,18 @@ class MainFrame(wx.Frame):
             for f in self.controller.get_folders(mb["id"]):
                 if dict(f).get("folder_type") == "inbox":
                     self.folder_panel.select_folder_by_id(f["id"])
+                    wx.CallAfter(self._restore_last_mail, f["id"])
                     return
+
+    def _restore_last_mail(self, folder_id: int):
+        """Wählt die zuletzt fokussierte Mail im Ordner wieder aus."""
+        last_mail_id = self.controller.get_setting(f"last_mail_{folder_id}", "")
+        if not last_mail_id:
+            return
+        try:
+            self.mail_list_panel.select_mail_by_id(int(last_mail_id))
+        except Exception:
+            pass
 
     def set_status(self, text: str, pane: int = 0):
         self.status_bar.SetStatusText(text, pane)

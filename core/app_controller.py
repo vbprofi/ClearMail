@@ -295,27 +295,26 @@ class AppController:
             server_folders = handler.list_folders()
             folder_map     = self._sync_imap_folders(acc, server_folders)
 
-            # Ordner in Thunderbird-Reihenfolge sortieren
             FOLDER_ORDER = ["inbox","sent","drafts","outbox","trash","spam","archive","custom"]
-            def _folder_sort_key(fi):
-                ftype = self._guess_folder_type(fi["name"])
-                return FOLDER_ORDER.index(ftype) if ftype in FOLDER_ORDER else len(FOLDER_ORDER)
+            def _fkey(fi):
+                ft = self._guess_folder_type(fi["name"])
+                return FOLDER_ORDER.index(ft) if ft in FOLDER_ORDER else len(FOLDER_ORDER)
 
             sorted_folders = sorted(
-                [f for f in server_folders if "\\" + "Noselect" not in f.get("flags", [])],
-                key=_folder_sort_key
+                [f for f in server_folders if "\\Noselect" not in f.get("flags", [])],
+                key=_fkey
             )
 
-            # Gesamtanzahl neuer Mails zuerst ermitteln (für %-Anzeige)
-            folder_uids: list[tuple] = []  # (imap_path, folder_id, new_uids)
+            # Phase 1: Alle neuen UIDs pro Ordner zählen
+            folder_uids: list[tuple] = []
             for folder_info in sorted_folders:
                 imap_path = folder_info["path"]
                 folder_id = folder_map.get(imap_path)
                 if not folder_id:
                     continue
-                known     = self._get_known_uids(folder_id)
-                all_uids  = handler.fetch_all_uids(imap_path)
-                new_uids  = [u for u in all_uids if u not in known]
+                known    = self._get_known_uids(folder_id)
+                all_uids = handler.fetch_all_uids(imap_path)
+                new_uids = [u for u in all_uids if u not in known]
                 if new_uids:
                     folder_uids.append((imap_path, folder_id, new_uids))
 
@@ -330,17 +329,17 @@ class AppController:
             if progress_cb:
                 progress_cb(f"0 / {total_new} Mails werden geladen…", 0, total_new)
 
+            # Phase 2: Vollständige Mails laden inkl. korrekter FLAGS
             for imap_path, folder_id, new_uids in folder_uids:
                 folder_name = imap_path.split("/")[-1].split(".")[-1]
-
-                # Vollständige Mails in Batches laden
-                batch_size = 10
+                batch_size  = 10
                 for i in range(0, len(new_uids), batch_size):
-                    batch = new_uids[i:i + batch_size]
-                    for uid in batch:
+                    for uid in new_uids[i:i + batch_size]:
                         try:
                             m = handler.fetch_mail(uid, imap_path)
                             if m:
+                                # is_read direkt aus IMAP-FLAGS (\\Seen)
+                                # is_flagged direkt aus IMAP-FLAGS (\\Flagged)
                                 m["folder_id"] = folder_id
                                 self.db.insert_mail(folder_id, m)
                                 count += 1
@@ -349,11 +348,8 @@ class AppController:
                         fetched += 1
                         if progress_cb and total_new > 0:
                             pct = int(fetched / total_new * 100)
-                            progress_cb(
-                                f"{fetched}/{total_new} – {folder_name}…",
-                                pct, total_new
-                            )
-
+                            progress_cb(f"{fetched}/{total_new} – {folder_name}…",
+                                        pct, total_new)
                 if new_uids:
                     self.db.update_folder_unread(folder_id)
 

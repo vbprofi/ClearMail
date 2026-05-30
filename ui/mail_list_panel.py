@@ -151,6 +151,18 @@ class MailListPanel(wx.Panel):
         finally:
             lc.Thaw()
 
+    def select_mail_by_id(self, mail_id: int):
+        """Wählt eine Mail anhand ihrer ID aus (Fokus + Selektion)."""
+        for idx, mail in self._mail_index.items():
+            if mail.get("id") == mail_id:
+                self.list_ctrl.SetItemState(
+                    idx,
+                    wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
+                    wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED
+                )
+                self.list_ctrl.EnsureVisible(idx)
+                return
+
     def reload_current_folder(self):
         parent = self.GetGrandParent()
         if parent and hasattr(parent, "_selected_folder_id") and parent._selected_folder_id:

@@ -1,99 +1,124 @@
 """
-date_utils.py – Datums-/Uhrzeitformatierung nach Systemgebietsschema.
+date_utils.py – Einheitliche Datums-/Uhrzeitformatierung nach Sprachraum.
 
-Nutzt babel (falls installiert) oder Windows-API (GetLocaleInfoEx)
-als Fallback auf strftime mit gesetztem Locale.
-Niemals explizites locale.setlocale() – das ist nicht threadsicher.
+DE: Montag, 25.09.2025 um 12:01 Uhr  (Preview)
+    25.09.25 12:01                     (Liste, dieses Jahr)
+    12:01                              (Liste, heute)
+
+EN: Monday, September 25, 2025 at 12:01 PM  (Preview)
+    Sep 25, 2025 12:01 PM                    (Liste)
+    12:01 PM                                 (Liste, heute)
+
+Nutzt babel (bevorzugt) oder Windows-API + strftime als Fallback.
 """
 from __future__ import annotations
 from datetime import datetime
 import sys
+import os
 
 
-def _get_system_locale() -> str:
-    """Ermittelt das Systemgebietsschema ohne locale.setlocale()."""
+# ------------------------------------------------------------------ #
+#  Gebietsschema ermitteln                                            #
+# ------------------------------------------------------------------ #
+
+_LOCALE_CODE: str | None = None
+
+
+def _detect_locale() -> str:
+    """Ermittelt Systemgebietsschema ohne locale.setlocale()."""
     if sys.platform == "win32":
         try:
             import ctypes
             buf = ctypes.create_unicode_buffer(85)
             ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 85)
-            return buf.value  # z.B. "de-DE", "en-US"
+            lc = buf.value  # "de-DE", "en-US", ...
+            if lc:
+                return lc
         except Exception:
             pass
-    # POSIX: aus Umgebungsvariablen lesen
-    import os
-    for var in ("LC_TIME", "LC_ALL", "LANG"):
+    for var in ("LC_TIME", "LC_ALL", "LANG", "LANGUAGE"):
         v = os.environ.get(var, "")
-        if v and v != "C":
-            return v.split(".")[0]  # "de_DE.UTF-8" → "de_DE"
-    return ""
+        if v and v not in ("C", "POSIX"):
+            return v.split(".")[0].replace("_", "-")
+    return "de-DE"
 
 
-_LOCALE_CODE: str | None = None
-
-
-def _locale_code() -> str:
+def locale_code() -> str:
     global _LOCALE_CODE
     if _LOCALE_CODE is None:
-        _LOCALE_CODE = _get_system_locale()
+        _LOCALE_CODE = _detect_locale()
     return _LOCALE_CODE
 
 
-def _try_babel(dt: datetime, fmt: str) -> str | None:
-    """Formatiert mit babel falls installiert."""
+def is_german() -> bool:
+    lc = locale_code().lower()
+    return lc.startswith("de") or lc.startswith("at") or lc.startswith("ch")
+
+
+# ------------------------------------------------------------------ #
+#  Babel-Formatierung                                                 #
+# ------------------------------------------------------------------ #
+
+def _babel_time(dt: datetime) -> str | None:
     try:
-        from babel.dates import format_datetime, format_date, format_time
-        lc = _locale_code() or "de_DE"
-        if fmt == "time":
-            return format_time(dt, format="short", locale=lc)
-        elif fmt == "date_short":
-            return format_date(dt, format="short", locale=lc)
-        elif fmt == "date_medium":
-            return format_date(dt, format="medium", locale=lc)
-        elif fmt == "datetime_medium":
-            return format_datetime(dt, format="medium", locale=lc)
-        elif fmt == "date_full":
-            return format_date(dt, format="full", locale=lc)
-    except ImportError:
-        pass
+        from babel.dates import format_time
+        return format_time(dt, format="short", locale=locale_code())
     except Exception:
-        pass
-    return None
+        return None
 
 
-def _strftime_locale(dt: datetime, fmt_str: str) -> str:
-    """Nutzt strftime mit temporär gesetzter Locale (threadsicher auf Windows via ctypes)."""
+def _babel_date_short(dt: datetime) -> str | None:
     try:
-        if sys.platform == "win32":
-            # Windows: _strftime nutzt die Thread-Locale über SetThreadLocale
-            import ctypes, locale
-            lc = _locale_code()
+        from babel.dates import format_date
+        return format_date(dt, format="short", locale=locale_code())
+    except Exception:
+        return None
+
+
+def _babel_datetime_full(dt: datetime) -> str | None:
+    """Vollständiges Datum mit Wochentag für Preview."""
+    try:
+        from babel.dates import format_datetime
+        lc = locale_code()
+        if is_german():
+            # "Montag, 25.09.2025 um 12:01 Uhr"
+            result = format_datetime(dt, format="EEEE, dd.MM.yyyy", locale=lc)
+            time   = format_datetime(dt, format="HH:mm", locale=lc)
+            return f"{result} um {time} Uhr"
+        else:
+            # "Monday, September 25, 2025 at 12:01 PM"
+            return format_datetime(dt, format="full", locale=lc)
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------------ #
+#  Windows-API-Fallback                                               #
+# ------------------------------------------------------------------ #
+
+def _win_strftime(dt: datetime, fmt: str) -> str:
+    """Setzt Thread-Locale temporär (threadsicher) dann strftime."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            lc  = locale_code()
             if lc:
-                # LCID aus Locale-Name
                 lcid = ctypes.windll.kernel32.LocaleNameToLCID(lc, 0)
                 if lcid:
                     ctypes.windll.kernel32.SetThreadLocale(lcid)
-            return dt.strftime(fmt_str)
-        else:
-            import locale
-            lc = _locale_code()
-            if lc:
-                saved = locale.getlocale(locale.LC_TIME)
-                try:
-                    locale.setlocale(locale.LC_TIME, lc)
-                    return dt.strftime(fmt_str)
-                finally:
-                    try: locale.setlocale(locale.LC_TIME, saved)
-                    except Exception: pass
-    except Exception:
-        pass
-    return dt.strftime(fmt_str)
+        except Exception:
+            pass
+    return dt.strftime(fmt)
 
+
+# ------------------------------------------------------------------ #
+#  Öffentliche Funktionen                                             #
+# ------------------------------------------------------------------ #
 
 def format_date_list(date_str: str) -> str:
     """
-    Datum für die Mailliste (kompakt).
-    Heute: nur Uhrzeit, dieses Jahr: Tag+Mon+Uhr, sonst: volles Datum
+    Kompaktes Datum für die Mailliste.
+    Heute → Uhrzeit | dieses Jahr → Kurzdatum + Uhr | älter → Kurzdatum
     """
     if not date_str:
         return ""
@@ -102,25 +127,37 @@ def format_date_list(date_str: str) -> str:
         now = datetime.now()
 
         if dt.date() == now.date():
-            return _try_babel(dt, "time") or _strftime_locale(dt, "%H:%M")
+            return _babel_time(dt) or _win_strftime(dt, "%H:%M")
         elif dt.year == now.year:
-            r = _try_babel(dt, "date_medium")
-            if r: return r
-            return _strftime_locale(dt, "%d. %b %H:%M")
+            d = _babel_date_short(dt) or _win_strftime(dt, "%d.%m.%y" if is_german() else "%b %d")
+            t = _babel_time(dt)       or _win_strftime(dt, "%H:%M")
+            return f"{d} {t}"
         else:
-            return _try_babel(dt, "date_short") or _strftime_locale(dt, "%x")
+            return _babel_date_short(dt) or _win_strftime(dt, "%d.%m.%Y" if is_german() else "%m/%d/%Y")
     except ValueError:
         return date_str[:16]
 
 
 def format_date_preview(date_str: str) -> str:
-    """Datum für die Vorschau (ausführlich mit Wochentag)."""
+    """
+    Ausführliches Datum für Vorschau und Nachrichtenfenster.
+    DE: Montag, 25.09.2025 um 12:01 Uhr
+    EN: Monday, September 25, 2025 at 12:01 PM
+    """
     if not date_str:
         return ""
     try:
         dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-        r  = _try_babel(dt, "datetime_medium")
-        if r: return r
-        return _strftime_locale(dt, "%A, %x %X")
+        r  = _babel_datetime_full(dt)
+        if r:
+            return r
+        # Fallback ohne babel
+        if is_german():
+            wd = _win_strftime(dt, "%A")
+            dm = _win_strftime(dt, "%d.%m.%Y")
+            hm = _win_strftime(dt, "%H:%M")
+            return f"{wd}, {dm} um {hm} Uhr"
+        else:
+            return _win_strftime(dt, "%A, %B %d, %Y at %I:%M %p")
     except ValueError:
         return date_str

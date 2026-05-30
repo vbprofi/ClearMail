@@ -13,8 +13,8 @@
   "menu_edit_find": "&Suchen\tCtrl+F",
   "menu_view": "&Ansicht",
   "menu_view_refresh": "A&ktualisieren\tF5",
-  "menu_view_col_date": "&Datum anzeigen",
-  "menu_view_col_size": "&Größe anzeigen",
+  "menu_view_col_date": "Datum",
+  "menu_view_col_size": "Größe",
   "menu_mail": "&Mail",
   "menu_mail_reply": "&Antworten\tCtrl+R",
   "menu_mail_reply_all": "Allen &antworten\tCtrl+Shift+R",
@@ -326,5 +326,11 @@
   "sort_flag": "Kennzeichnung",
   "sort_attach": "Anhänge",
   "sort_asc": "Aufsteigend",
-  "sort_desc": "Absteigend"
+  "sort_desc": "Absteigend",
+  "menu_view_columns": "Spalten anzeigen",
+  "menu_view_col_flag": "Kennzeichnung",
+  "menu_view_col_status": "Status (Gelesen)",
+  "menu_view_col_from": "Von",
+  "menu_view_col_subject": "Betreff",
+  "menu_view_col_attach": "Anhänge"
 }
