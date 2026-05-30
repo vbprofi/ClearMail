@@ -6,6 +6,7 @@ Tab-Navigation via EVT_CHAR_HOOK.
 import wx
 from datetime import datetime
 from core.i18n import tr
+from core.date_utils import format_date_preview
 from ui.html_renderer import html_to_text
 
 
@@ -128,15 +129,4 @@ class MailPreviewPanel(wx.Panel):
 
     @staticmethod
     def _format_date(date_str: str) -> str:
-        if not date_str:
-            return ""
-        try:
-            from datetime import datetime as _dt
-            dt = _dt.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-            # Wochentag + Datum + Uhrzeit in Systemsprache
-            try:
-                return dt.strftime("%A, %x, %X")
-            except Exception:
-                return dt.strftime("%A, %d. %B %Y, %H:%M")
-        except ValueError:
-            return date_str
+        return format_date_preview(date_str)

@@ -316,5 +316,15 @@
   "auth_save_ok": "Credentials saved.",
   "fetch_running": "Fetching messages…",
   "send_running": "Sending messages…",
-  "folder_outbox": "Outbox"
+  "folder_outbox": "Outbox",
+  "menu_view_sort": "Sort by",
+  "sort_date": "Date",
+  "sort_from": "From",
+  "sort_subject": "Subject",
+  "sort_size": "Size",
+  "sort_status": "Read/Unread",
+  "sort_flag": "Flag",
+  "sort_attach": "Attachments",
+  "sort_asc": "Ascending",
+  "sort_desc": "Descending"
 }

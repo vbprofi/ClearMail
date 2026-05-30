@@ -5,6 +5,7 @@ MailListPanel – Mail-Liste. Vollständig i18n-fähig.
 import wx
 from datetime import datetime
 from core.i18n import tr
+from core.date_utils import format_date_list
 
 
 COL_FLAG    = 0
@@ -66,36 +67,89 @@ class MailListPanel(wx.Panel):
     # ------------------------------------------------------------------ #
 
     def load_mails(self, mails: list):
-        self.list_ctrl.DeleteAllItems()
         self._mail_data  = [dict(m) for m in mails]
         self._mail_index = {}
+        self._sort_col   = getattr(self, "_sort_col", COL_DATE)
+        self._sort_asc   = getattr(self, "_sort_asc", False)
 
-        for row, mail in enumerate(self._mail_data):
-            flag_str = "★" if mail.get("is_flagged") else ""
-            idx = self.list_ctrl.InsertItem(row, flag_str)
+        # Sortierung anwenden bevor Rendering
+        self._apply_sort_to_data()
 
-            status = tr("mail_status_unread") if not mail.get("is_read") else tr("mail_status_read")
-            self.list_ctrl.SetItem(idx, COL_READ, status)
+        lc   = self.list_ctrl
+        font = lc.GetFont()
+        bold = font.Bold()
 
-            sender = str(mail.get("sender_name") or mail.get("sender") or "")
-            self.list_ctrl.SetItem(idx, COL_FROM, sender)
+        lc.Freeze()
+        try:
+            lc.DeleteAllItems()
+            for row, mail in enumerate(self._mail_data):
+                flag_str = "★" if mail.get("is_flagged") else ""
+                idx = lc.InsertItem(row, flag_str)
 
-            subject = str(mail.get("subject") or tr("preview_no_subject"))
-            if mail.get("has_attach"):
-                subject = "📎 " + subject
-            self.list_ctrl.SetItem(idx, COL_SUBJECT, subject)
+                status = tr("mail_status_unread") if not mail.get("is_read") else tr("mail_status_read")
+                lc.SetItem(idx, COL_READ, status)
+                lc.SetItem(idx, COL_FROM, str(mail.get("sender_name") or mail.get("sender") or ""))
 
-            self.list_ctrl.SetItem(idx, COL_DATE, self._format_date(str(mail.get("date") or "")))
-            self.list_ctrl.SetItem(idx, COL_SIZE, self._format_size(mail.get("size") or 0))
+                subject = str(mail.get("subject") or tr("preview_no_subject"))
+                if mail.get("has_attach"):
+                    subject = "📎 " + subject
+                lc.SetItem(idx, COL_SUBJECT, subject)
+                lc.SetItem(idx, COL_DATE, self._format_date(str(mail.get("date") or "")))
+                lc.SetItem(idx, COL_SIZE, self._format_size(mail.get("size") or 0))
 
-            if not mail.get("is_read"):
-                font = self.list_ctrl.GetFont()
-                self.list_ctrl.SetItemFont(idx, font.Bold())
+                if not mail.get("is_read"):
+                    lc.SetItemFont(idx, bold)
 
-            self._mail_index[idx] = mail
+                self._mail_index[idx] = mail
+        finally:
+            lc.Thaw()
 
-        count = len(mails)
-        self.list_ctrl.SetName(tr("mail_list_count", count=count))
+        lc.SetName(tr("mail_list_count", count=len(mails)))
+
+    def _apply_sort_to_data(self):
+        """Sortiert self._mail_data nach aktuellem Sortierfeld."""
+        col = getattr(self, "_sort_col", COL_DATE)
+        asc = getattr(self, "_sort_asc", False)
+
+        def _key(m):
+            if col == COL_DATE:    return str(m.get("date") or "")
+            if col == COL_FROM:    return (str(m.get("sender_name") or m.get("sender") or "")).lower()
+            if col == COL_SUBJECT: return str(m.get("subject") or "").lower()
+            if col == COL_SIZE:    return int(m.get("size") or 0)
+            if col == COL_READ:    return int(m.get("is_read") or 0)
+            if col == COL_FLAG:    return int(m.get("is_flagged") or 0)
+            return str(m.get("date") or "")
+
+        self._mail_data.sort(key=_key, reverse=not asc)
+        # Index neu aufbauen
+        self._mail_index = {i: m for i, m in enumerate(self._mail_data)}
+
+    def _rebuild_from_sorted_data(self):
+        """Rendert die Mailliste neu nach einer Sortieränderung (Freeze/Thaw)."""
+        lc   = self.list_ctrl
+        font = lc.GetFont()
+        bold = font.Bold()
+        lc.Freeze()
+        try:
+            lc.DeleteAllItems()
+            self._mail_index = {}
+            for row, mail in enumerate(self._mail_data):
+                flag_str = "★" if mail.get("is_flagged") else ""
+                idx = lc.InsertItem(row, flag_str)
+                status = tr("mail_status_unread") if not mail.get("is_read") else tr("mail_status_read")
+                lc.SetItem(idx, COL_READ, status)
+                lc.SetItem(idx, COL_FROM, str(mail.get("sender_name") or mail.get("sender") or ""))
+                subject = str(mail.get("subject") or tr("preview_no_subject"))
+                if mail.get("has_attach"):
+                    subject = "📎 " + subject
+                lc.SetItem(idx, COL_SUBJECT, subject)
+                lc.SetItem(idx, COL_DATE, self._format_date(str(mail.get("date") or "")))
+                lc.SetItem(idx, COL_SIZE, self._format_size(mail.get("size") or 0))
+                if not mail.get("is_read"):
+                    lc.SetItemFont(idx, bold)
+                self._mail_index[idx] = mail
+        finally:
+            lc.Thaw()
 
     def reload_current_folder(self):
         parent = self.GetGrandParent()
@@ -173,27 +227,7 @@ class MailListPanel(wx.Panel):
 
     @staticmethod
     def _format_date(date_str: str) -> str:
-        if not date_str:
-            return ""
-        try:
-            dt  = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-            now = datetime.now()
-            import locale as _loc
-            try:
-                # Systemgebietsschema nutzen (zeigt Datum in Landessprache)
-                if dt.date() == now.date():
-                    return dt.strftime("%X")[:5]   # Uhrzeit HH:MM
-                elif dt.year == now.year:
-                    return dt.strftime("%d. %b %H:%M")
-                return dt.strftime("%x")            # Datum nach Locale
-            except Exception:
-                if dt.date() == now.date():
-                    return dt.strftime("%H:%M")
-                elif dt.year == now.year:
-                    return dt.strftime("%d.%m. %H:%M")
-                return dt.strftime("%d.%m.%Y")
-        except ValueError:
-            return date_str[:16]
+        return format_date_list(date_str)
 
     @staticmethod
     def _format_size(size: int) -> str:

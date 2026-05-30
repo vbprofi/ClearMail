@@ -69,6 +69,34 @@ class MainFrame(wx.Frame):
         self.mi_col_date   = mv.AppendCheckItem(wx.ID_ANY, tr("menu_view_col_date"))
         self.mi_col_size   = mv.AppendCheckItem(wx.ID_ANY, tr("menu_view_col_size"))
         self.mi_col_date.Check(True);  self.mi_col_size.Check(True)
+        mv.AppendSeparator()
+
+        # ---- Sortieren-Untermenü (Thunderbird-Stil) ----
+        ms = wx.Menu()
+        # Sortierfelder
+        self._sort_items = {}
+        for key, label in [
+            ("date",    tr("sort_date")),
+            ("from",    tr("sort_from")),
+            ("subject", tr("sort_subject")),
+            ("size",    tr("sort_size")),
+            ("status",  tr("sort_status")),
+            ("flag",    tr("sort_flag")),
+            ("attach",  tr("sort_attach")),
+        ]:
+            mi = ms.AppendRadioItem(wx.ID_ANY, label)
+            self._sort_items[key] = mi
+            self.Bind(wx.EVT_MENU, lambda e, k=key: self._on_sort(k), mi)
+        self._sort_items["date"].Check(True)
+
+        ms.AppendSeparator()
+        self.mi_sort_asc  = ms.AppendRadioItem(wx.ID_ANY, tr("sort_asc"))
+        self.mi_sort_desc = ms.AppendRadioItem(wx.ID_ANY, tr("sort_desc"))
+        self.mi_sort_desc.Check(True)
+        self.Bind(wx.EVT_MENU, lambda e: self._on_sort_direction(), self.mi_sort_asc)
+        self.Bind(wx.EVT_MENU, lambda e: self._on_sort_direction(), self.mi_sort_desc)
+
+        mv.AppendSubMenu(ms, tr("menu_view_sort"))
         mb.Append(mv, tr("menu_view"))
 
         mm = wx.Menu()
@@ -275,17 +303,33 @@ class MainFrame(wx.Frame):
             self._mark_read_timer = None
 
         self._selected_mail_id = mail_id
-        mail = self.controller.get_mail(mail_id, self._selected_folder_id)
+        # get_mail OHNE automatisches Markieren als gelesen – das steuert der Timer
+        mail = self.controller.db.get_mail(mail_id, self._selected_folder_id)
         if mail:
             self.mail_preview_panel.show_mail(dict(mail))
-            self.mail_list_panel.refresh_mail_read(mail_id)
             if self._selected_folder_id:
                 self.folder_panel.refresh_folder_unread(self._selected_folder_id)
 
-            # „Als gelesen markieren nach X Sekunden"
             delay_s = int(self.controller.get_setting("mark_read_after", "0"))
             mail_d  = dict(mail)
-            if delay_s > 0 and not int(mail_d.get("is_read") or 0):
+            already_read = int(mail_d.get("is_read") or 0)
+
+            if already_read:
+                # Bereits gelesen – nichts tun
+                return
+
+            if delay_s == 0:
+                # Sofort als gelesen markieren
+                fid = self._selected_folder_id
+                self.controller.mark_mail_read(mail_id, True, folder_id=fid)
+                if fid:
+                    self.controller.db.update_folder_unread(fid)
+                self.mail_list_panel.refresh_mail_read(mail_id, force_read=True)
+                if fid:
+                    self.folder_panel.refresh_folder_unread(fid)
+                self.controller.addon_mgr.fire("mail_read", {"mail_id": mail_id})
+            elif delay_s > 0:
+                # Nach X Sekunden als gelesen markieren
                 self._mark_read_timer = wx.CallLater(
                     delay_s * 1000, self._auto_mark_read, mail_id
                 )
@@ -426,6 +470,29 @@ class MainFrame(wx.Frame):
         """Suchfenster öffnen."""
         dlg = SearchDialog(self, self.controller)
         dlg.Show()
+
+    def _on_sort(self, sort_key: str):
+        """Sortiert die Mailliste nach dem gewählten Feld."""
+        from ui.mail_list_panel import COL_DATE, COL_FROM, COL_SUBJECT, COL_SIZE, COL_READ, COL_FLAG
+        col_map = {
+            "date":    COL_DATE,
+            "from":    COL_FROM,
+            "subject": COL_SUBJECT,
+            "size":    COL_SIZE,
+            "status":  COL_READ,
+            "flag":    COL_FLAG,
+            "attach":  COL_SUBJECT,
+        }
+        self.mail_list_panel._sort_col = col_map.get(sort_key, COL_DATE)
+        self.mail_list_panel._sort_asc = self.mi_sort_asc.IsChecked()
+        self.mail_list_panel._apply_sort_to_data()
+        self.mail_list_panel._rebuild_from_sorted_data()
+
+    def _on_sort_direction(self):
+        """Richtungswechsel ohne Feldwechsel."""
+        self.mail_list_panel._sort_asc = self.mi_sort_asc.IsChecked()
+        self.mail_list_panel._apply_sort_to_data()
+        self.mail_list_panel._rebuild_from_sorted_data()
 
     def _on_refresh(self, event):
         if self._selected_folder_id:

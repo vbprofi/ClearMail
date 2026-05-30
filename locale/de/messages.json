@@ -316,5 +316,15 @@
   "auth_save_ok": "Zugangsdaten gespeichert.",
   "fetch_running": "Nachrichten werden abgerufen…",
   "send_running": "Nachrichten werden gesendet…",
-  "folder_outbox": "Postausgang"
+  "folder_outbox": "Postausgang",
+  "menu_view_sort": "Sortieren nach",
+  "sort_date": "Datum",
+  "sort_from": "Von",
+  "sort_subject": "Betreff",
+  "sort_size": "Größe",
+  "sort_status": "Gelesen/Ungelesen",
+  "sort_flag": "Kennzeichnung",
+  "sort_attach": "Anhänge",
+  "sort_asc": "Aufsteigend",
+  "sort_desc": "Absteigend"
 }
