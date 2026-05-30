@@ -585,7 +585,8 @@ class ComposeDialog(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         gs    = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
         gs.AddGrowableCol(1)
-        accs         = self.controller.get_accounts()
+        accs         = [a for a in self.controller.get_accounts()
+                        if dict(a).get("protocol", "IMAP") != "LOCAL"]
         from_choices = [f"{a['name']} <{a['email']}>" for a in accs] or ["(–)"]
         self.cho_from    = add_labeled_field(panel, gs, tr("compose_from"),
                                               lambda p: wx.Choice(p, choices=from_choices))

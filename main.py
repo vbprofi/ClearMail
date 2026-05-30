@@ -74,23 +74,20 @@ class MailClientApp(wx.App):
             self.frame._restore_last_folder()
 
     def _create_default_local_account(self):
-        """Legt ein Standard-Lokalkonto an wenn der Nutzer keins erstellt hat."""
-        import getpass
-        username = getpass.getuser()
-        self.controller.save_account({
-            "id":       None,
-            "name":     username,
-            "email":    f"{username}@lokal",
-            "protocol": "IMAP",
-            "in_host":  "localhost",
-            "in_port":  993,
-            "in_ssl":   0,
-            "out_host": "localhost",
-            "out_port": 587,
-            "out_ssl":  0,
-            "username": username,
-            "password": "",
-        })
+        """Legt ein Standard-Lokalkonto an (rein lokal, kein Mail-Server)."""
+        try:
+            self.controller.db.create_local_account("Lokale Ordner", "local")
+        except Exception:
+            # Fallback falls create_local_account nicht vorhanden
+            self.controller.save_account({
+                "id":       None,
+                "name":     "Lokale Ordner",
+                "email":    "local",
+                "protocol": "LOCAL",
+                "in_host":  "", "in_port":  0, "in_ssl":  0,
+                "out_host": "", "out_port": 0, "out_ssl": 0,
+                "username": "", "password": "",
+            })
 
     def OnExit(self):
         self.db_manager.close()

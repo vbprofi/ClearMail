@@ -1321,14 +1321,15 @@ class DatabaseManager:
     # ------------------------------------------------------------------ #
 
 
-    def create_local_account(self, name: str, email: str) -> int:
-        """Legt ein lokales Konto mit den 6 Standard-IMAP-Ordnern an."""
+    def create_local_account(self, name: str, email: str = "local") -> int:
+        """Legt ein lokales Konto an (protocol=LOCAL, Thunderbird-Ordnerstruktur:
+        Posteingang, Entwürfe, Gesendet, Papierkorb, Postausgang – kein Spam/Archiv)."""
         data = {
             "id": None,
             "name": name, "email": email, "protocol": "LOCAL",
             "in_host": "", "in_port": 0, "in_ssl": 0,
             "out_host": "", "out_port": 0, "out_ssl": 0,
-            "username": email, "password": "",
+            "username": "", "password": "",
         }
         return self.save_account(data)
 
@@ -1377,12 +1378,24 @@ class DatabaseManager:
                    (account_id, data["name"], data["email"]))
         mb_id = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        imap_folders = [
-            ("Posteingang", "inbox"),  ("Gesendet",  "sent"),
-            ("Entwürfe",    "drafts"), ("Papierkorb","trash"),
-            ("Spam",        "spam"),   ("Archiv",    "archive"),
-        ]
-        for fname, ftype in imap_folders:
+        # Ordnerstruktur je nach Protokoll
+        if data.get("protocol", "IMAP") == "LOCAL":
+            # Lokale Ordner: wie Thunderbird (kein Spam, kein Archiv, dafür Postausgang)
+            folders = [
+                ("Posteingang", "inbox"),
+                ("Entwürfe",    "drafts"),
+                ("Gesendet",    "sent"),
+                ("Papierkorb",  "trash"),
+                ("Postausgang", "outbox"),
+            ]
+        else:
+            # IMAP/POP3-Konto: vollständige Ordnerstruktur
+            folders = [
+                ("Posteingang", "inbox"),   ("Gesendet",  "sent"),
+                ("Entwürfe",    "drafts"),  ("Papierkorb","trash"),
+                ("Spam",        "spam"),    ("Archiv",    "archive"),
+            ]
+        for fname, ftype in folders:
             sc.execute(
                 "INSERT INTO folders (mailbox_id,parent_id,name,folder_type,unread) "
                 "VALUES (?,NULL,?,?,0)",

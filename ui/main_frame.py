@@ -478,6 +478,7 @@ class MainFrame(wx.Frame):
             if d.ShowModal() == wx.ID_OK:
                 dlg = AccountDialog(self, self.controller, account_id=accs[d.GetSelection()]["id"])
                 dlg.ShowModal(); dlg.Destroy()
+                self.folder_panel.reload()  # Name-Änderung sofort anzeigen
 
     def _on_del_account(self, event):
         accs = self.controller.get_accounts()
