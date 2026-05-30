@@ -315,5 +315,6 @@
   "auth_retry": "Reconnect",
   "auth_save_ok": "Credentials saved.",
   "fetch_running": "Fetching messages…",
-  "send_running": "Sending messages…"
+  "send_running": "Sending messages…",
+  "folder_outbox": "Outbox"
 }

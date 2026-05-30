@@ -131,7 +131,12 @@ class MailPreviewPanel(wx.Panel):
         if not date_str:
             return ""
         try:
-            dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-            return dt.strftime("%A, %d. %B %Y, %H:%M Uhr")
+            from datetime import datetime as _dt
+            dt = _dt.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
+            # Wochentag + Datum + Uhrzeit in Systemsprache
+            try:
+                return dt.strftime("%A, %x, %X")
+            except Exception:
+                return dt.strftime("%A, %d. %B %Y, %H:%M")
         except ValueError:
             return date_str

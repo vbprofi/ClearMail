@@ -289,31 +289,72 @@ class AppController:
 
         count = 0
         with handler:
-            # Server-Ordner abrufen und in DB synchronisieren
+            if progress_cb:
+                progress_cb("Ordnerstruktur wird abgerufen…", 0, 0)
+
             server_folders = handler.list_folders()
             folder_map     = self._sync_imap_folders(acc, server_folders)
 
-            for folder_info in server_folders:
-                if "\\Noselect" in folder_info.get("flags", []):
-                    continue
+            # Ordner in Thunderbird-Reihenfolge sortieren
+            FOLDER_ORDER = ["inbox","sent","drafts","outbox","trash","spam","archive","custom"]
+            def _folder_sort_key(fi):
+                ftype = self._guess_folder_type(fi["name"])
+                return FOLDER_ORDER.index(ftype) if ftype in FOLDER_ORDER else len(FOLDER_ORDER)
+
+            sorted_folders = sorted(
+                [f for f in server_folders if "\\" + "Noselect" not in f.get("flags", [])],
+                key=_folder_sort_key
+            )
+
+            # Gesamtanzahl neuer Mails zuerst ermitteln (für %-Anzeige)
+            folder_uids: list[tuple] = []  # (imap_path, folder_id, new_uids)
+            for folder_info in sorted_folders:
                 imap_path = folder_info["path"]
                 folder_id = folder_map.get(imap_path)
                 if not folder_id:
                     continue
+                known     = self._get_known_uids(folder_id)
+                all_uids  = handler.fetch_all_uids(imap_path)
+                new_uids  = [u for u in all_uids if u not in known]
+                if new_uids:
+                    folder_uids.append((imap_path, folder_id, new_uids))
 
+            total_new = sum(len(u) for _, _, u in folder_uids)
+            fetched   = 0
+
+            if total_new == 0:
                 if progress_cb:
-                    progress_cb(f"Ordner: {folder_info['name']}…")
+                    progress_cb("Keine neuen Mails.", 100, 0)
+                return 0
 
-                # Bereits bekannte UIDs
-                known = self._get_known_uids(folder_id)
-                new_mails = handler.fetch_new_mails(imap_path, known_uids=known)
+            if progress_cb:
+                progress_cb(f"0 / {total_new} Mails werden geladen…", 0, total_new)
 
-                for m in new_mails:
-                    m["folder_id"] = folder_id
-                    self.db.insert_mail(folder_id, m)
-                    count += 1
+            for imap_path, folder_id, new_uids in folder_uids:
+                folder_name = imap_path.split("/")[-1].split(".")[-1]
 
-                if new_mails:
+                # Vollständige Mails in Batches laden
+                batch_size = 10
+                for i in range(0, len(new_uids), batch_size):
+                    batch = new_uids[i:i + batch_size]
+                    for uid in batch:
+                        try:
+                            m = handler.fetch_mail(uid, imap_path)
+                            if m:
+                                m["folder_id"] = folder_id
+                                self.db.insert_mail(folder_id, m)
+                                count += 1
+                        except Exception:
+                            pass
+                        fetched += 1
+                        if progress_cb and total_new > 0:
+                            pct = int(fetched / total_new * 100)
+                            progress_cb(
+                                f"{fetched}/{total_new} – {folder_name}…",
+                                pct, total_new
+                            )
+
+                if new_uids:
                     self.db.update_folder_unread(folder_id)
 
         return count
@@ -436,9 +477,13 @@ class AppController:
 
     def _sync_imap_folders(self, acc: dict, server_folders: list) -> dict:
         """
-        Synchronisiert IMAP-Server-Ordner mit der lokalen DB.
-        Gibt {imap_path: folder_id} zurück.
+        Synchronisiert IMAP-Server-Ordner (Thunderbird-Stil):
+        - Platzhalter (lokal vorher angelegt, kein imap_path) werden mit dem
+          passenden Server-Ordner zusammengeführt (per folder_type).
+        - Ordnernamen werden lokalisiert angezeigt.
+        - Keine Duplikate.
         """
+        from core.i18n import tr
         sc = self.db._get_structure_conn()
         mb_row = sc.execute(
             "SELECT id FROM mailboxes WHERE account_id=?", (acc["id"],)
@@ -447,48 +492,95 @@ class AppController:
             return {}
         mb_id = mb_row[0]
 
-        existing = {
-            r["imap_path"]: r["id"]
-            for r in sc.execute(
-                "SELECT id, imap_path FROM folders WHERE mailbox_id=? AND imap_path IS NOT NULL",
-                (mb_id,)
-            ).fetchall()
-            if r["imap_path"]
+        # Lokalisierte Ordnernamen (Thunderbird-Konvention)
+        LOCALIZED = {
+            "inbox":   tr("folder_inbox")   if tr("folder_inbox")   != "folder_inbox"   else "Posteingang",
+            "sent":    tr("folder_sent")    if tr("folder_sent")    != "folder_sent"    else "Gesendet",
+            "drafts":  tr("folder_drafts")  if tr("folder_drafts")  != "folder_drafts"  else "Entwürfe",
+            "trash":   tr("folder_trash")   if tr("folder_trash")   != "folder_trash"   else "Papierkorb",
+            "spam":    tr("folder_spam")    if tr("folder_spam")    != "folder_spam"    else "Spam",
+            "archive": tr("folder_archive") if tr("folder_archive") != "folder_archive" else "Archiv",
         }
+
+        # Alle vorhandenen Ordner dieses Postfachs
+        existing_by_imap = {}  # imap_path → folder_id
+        existing_by_type = {}  # folder_type → folder_id (Platzhalter ohne imap_path)
+        for r in sc.execute(
+            "SELECT id, imap_path, folder_type FROM folders WHERE mailbox_id=?",
+            (mb_id,)
+        ).fetchall():
+            r = dict(r)
+            if r["imap_path"]:
+                existing_by_imap[r["imap_path"]] = r["id"]
+            elif r["folder_type"] and r["folder_type"] not in ("outbox",):
+                existing_by_type[r["folder_type"]] = r["id"]
 
         folder_map = {}
         for sf in server_folders:
-            path = sf["path"]
-            if path in existing:
-                folder_map[path] = existing[path]
-            else:
-                # Ordner neu anlegen
-                ftype = self._guess_folder_type(sf["name"])
+            path  = sf["path"]
+            ftype = self._guess_folder_type(sf["name"])
+            local_name = LOCALIZED.get(ftype, sf["name"])
+
+            if path in existing_by_imap:
+                # Bereits synchronisiert
+                folder_map[path] = existing_by_imap[path]
+            elif ftype in existing_by_type:
+                # Platzhalter zusammenführen: imap_path + lokalisierten Namen setzen
+                fid = existing_by_type.pop(ftype)
                 sc.execute(
-                    "INSERT INTO folders (mailbox_id, parent_id, name, folder_type, imap_path, unread) "
-                    "VALUES (?, NULL, ?, ?, ?, 0)",
-                    (mb_id, sf["name"], ftype, path)
+                    "UPDATE folders SET imap_path=?, name=? WHERE id=?",
+                    (path, local_name, fid)
                 )
-                folder_map[path] = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
+                folder_map[path] = fid
+                existing_by_imap[path] = fid
+            else:
+                # Neuen Ordner anlegen
+                sc.execute(
+                    "INSERT INTO folders "
+                    "(mailbox_id, parent_id, name, folder_type, imap_path, unread) "
+                    "VALUES (?, NULL, ?, ?, ?, 0)",
+                    (mb_id, local_name, ftype, path)
+                )
+                fid = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
+                folder_map[path] = fid
+                existing_by_imap[path] = fid
+
         sc.commit()
         return folder_map
 
     @staticmethod
     def _guess_folder_type(name: str) -> str:
         n = name.lower()
-        if n in ("inbox", "posteingang"):               return "inbox"
-        if n in ("sent", "gesendet", "sent items"):     return "sent"
-        if n in ("drafts", "entwürfe", "draft"):        return "drafts"
-        if n in ("trash", "papierkorb", "deleted items","deleted"): return "trash"
-        if n in ("spam", "junk", "junk mail"):          return "spam"
-        if n in ("archive", "archiv"):                  return "archive"
+        if n in ("inbox", "posteingang"):                              return "inbox"
+        if n in ("sent", "gesendet", "sent items", "sent mail"):       return "sent"
+        if n in ("drafts", "entwürfe", "draft"):                       return "drafts"
+        if n in ("trash", "papierkorb", "deleted", "deleted items", "bin"): return "trash"
+        if n in ("spam", "junk", "junk mail", "bulk mail"):            return "spam"
+        if n in ("archive", "archiv", "archives"):                     return "archive"
+        if n in ("outbox", "postausgang"):                             return "outbox"
         return "custom"
 
     def _get_known_uids(self, folder_id: int) -> set:
-        """Gibt alle bekannten UIDs eines Ordners zurück."""
+        """Gibt alle bekannten UIDs eines Ordners direkt per SQL zurück (schnell)."""
         try:
-            mails = self.db.get_mails(folder_id)
-            return {str(dict(m).get("uid", "")) for m in mails if dict(m).get("uid")}
+            mode = self.db.get_setting("mail_storage", "sqlite_one")
+            if mode == "sqlite_one":
+                rows = self.db._get_structure_conn().execute(
+                    "SELECT uid FROM mails WHERE folder_id=? AND uid IS NOT NULL AND uid != ''",
+                    (folder_id,)
+                ).fetchall()
+                return {str(r[0]) for r in rows}
+            elif mode == "sqlite_per_account":
+                conn = self.db._mail_conn_for_folder(folder_id)
+                rows = conn.execute(
+                    "SELECT uid FROM mails WHERE folder_id=? AND uid IS NOT NULL AND uid != ''",
+                    (folder_id,)
+                ).fetchall()
+                return {str(r[0]) for r in rows}
+            else:
+                # File-Backend: UIDs aus JSON-Metadaten
+                mails = self.db.get_mails(folder_id)
+                return {str(dict(m).get("uid", "")) for m in mails if dict(m).get("uid")}
         except Exception:
             return set()
 

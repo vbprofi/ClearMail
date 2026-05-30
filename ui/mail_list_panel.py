@@ -178,11 +178,20 @@ class MailListPanel(wx.Panel):
         try:
             dt  = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
             now = datetime.now()
-            if dt.date() == now.date():
-                return dt.strftime("%H:%M")
-            elif dt.year == now.year:
-                return dt.strftime("%d.%m. %H:%M")
-            return dt.strftime("%d.%m.%Y")
+            import locale as _loc
+            try:
+                # Systemgebietsschema nutzen (zeigt Datum in Landessprache)
+                if dt.date() == now.date():
+                    return dt.strftime("%X")[:5]   # Uhrzeit HH:MM
+                elif dt.year == now.year:
+                    return dt.strftime("%d. %b %H:%M")
+                return dt.strftime("%x")            # Datum nach Locale
+            except Exception:
+                if dt.date() == now.date():
+                    return dt.strftime("%H:%M")
+                elif dt.year == now.year:
+                    return dt.strftime("%d.%m. %H:%M")
+                return dt.strftime("%d.%m.%Y")
         except ValueError:
             return date_str[:16]
 

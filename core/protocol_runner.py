@@ -97,6 +97,7 @@ class ProtocolWorker(threading.Thread):
             log("error", f"Protokoll-Fehler: {msg}")
             wx.CallAfter(self.on_error, msg, is_auth)
 
-    def _progress(self, msg: str):
+    def _progress(self, msg: str, pct: int = -1, total: int = 0):
+        """pct=-1 → kein Prozentwert verfügbar (unbestimmt)."""
         log("info", msg)
-        wx.CallAfter(self.on_progress, msg)
+        wx.CallAfter(self.on_progress, msg, pct, total)

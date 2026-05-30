@@ -118,15 +118,32 @@ class IMAPHandler:
         return folders
 
     def select_folder(self, folder_path: str) -> int:
-        """Wählt einen Ordner aus. Gibt Nachrichtenanzahl zurück."""
+        """Wählt einen Ordner aus. Probiert mehrere Schreibweisen."""
         if not self._conn:
             raise RuntimeError("Nicht verbunden.")
-        typ, data = self._conn.select(f'"{folder_path}"')
-        if typ != "OK":
-            typ, data = self._conn.select(folder_path)
-        if typ == "OK" and data and data[0]:
-            return int(data[0])
+        # Versuche: mit Anführungszeichen, ohne, mit UTF-7-Kodierung
+        attempts = [
+            f'"{folder_path}"',
+            folder_path,
+            f'"{self._encode_folder_name(folder_path)}"',
+            self._encode_folder_name(folder_path),
+        ]
+        for attempt in attempts:
+            try:
+                typ, data = self._conn.select(attempt)
+                if typ == "OK" and data and data[0]:
+                    return int(data[0])
+            except Exception:
+                pass
         return 0
+
+    @staticmethod
+    def _encode_folder_name(name: str) -> str:
+        """Kodiert Ordnernamen nach IMAP modified UTF-7 (RFC 3501)."""
+        try:
+            return name.encode("utf-7").decode("ascii").replace("+", "&").replace("&-", "+")
+        except Exception:
+            return name
 
     # ------------------------------------------------------------------ #
     #  Mails abrufen                                                     #
@@ -193,24 +210,118 @@ class IMAPHandler:
         return result
 
     def fetch_new_mails(self, folder: str = "INBOX",
-                        known_uids: set = None) -> List[Dict]:
+                        known_uids: set = None,
+                        headers_only: bool = True) -> List[Dict]:
         """
         Ruft neue (unbekannte) Mails ab.
         known_uids: Set bereits bekannter UIDs → werden übersprungen.
-        Gibt Liste von Mail-Dicts zurück.
+        headers_only: True = nur Header laden (schnell), Body wird lazy geladen.
         """
         known_uids = known_uids or set()
-        all_uids   = self.fetch_all_uids(folder)
-        new_uids   = [u for u in all_uids if u not in known_uids]
+        count = self.select_folder(folder)
+        if count == 0:
+            return []
+
+        all_uids = self.fetch_all_uids(folder)
+        new_uids = [u for u in all_uids if u not in known_uids]
+        if not new_uids:
+            return []
+
         mails = []
-        for uid in new_uids:
+        # In Batches abrufen (max 50 auf einmal) um Timeouts zu vermeiden
+        batch_size = 50
+        for i in range(0, len(new_uids), batch_size):
+            batch = new_uids[i:i + batch_size]
+            uid_set = ",".join(batch)
             try:
-                m = self.fetch_mail(uid, folder)
-                if m:
-                    mails.append(m)
+                if headers_only:
+                    # Nur Envelope + Flags + Größe (sehr schnell)
+                    typ, data = self._conn.uid(
+                        "fetch", uid_set,
+                        "(UID FLAGS RFC822.SIZE ENVELOPE "
+                        "BODY.PEEK[HEADER.FIELDS (Subject From To Cc Date Message-ID)])"
+                    )
+                    if typ != "OK":
+                        continue
+                    for item in data:
+                        if not isinstance(item, tuple):
+                            continue
+                        try:
+                            m = self._parse_fetch_response(item)
+                            if m:
+                                mails.append(m)
+                        except Exception:
+                            pass
+                else:
+                    # Vollständige Mails
+                    for uid in batch:
+                        try:
+                            m = self.fetch_mail(uid, folder)
+                            if m:
+                                mails.append(m)
+                        except Exception:
+                            pass
             except Exception:
-                pass
+                # Fallback: einzeln abrufen
+                for uid in batch:
+                    try:
+                        m = self.fetch_mail_headers(uid, folder)
+                        if m:
+                            mails.append(m)
+                    except Exception:
+                        pass
         return mails
+
+    def _parse_fetch_response(self, item: tuple) -> Optional[Dict]:
+        """Parst eine FETCH-Antwort (Header-Only-Modus)."""
+        flags_str = item[0].decode("utf-8", errors="replace") if isinstance(item[0], bytes) else str(item[0])
+        raw_header = item[1] if len(item) > 1 else b""
+        if not raw_header:
+            return None
+
+        import email as _email
+        msg = _email.message_from_bytes(raw_header if isinstance(raw_header, bytes) else raw_header.encode())
+
+        subject    = self.decode_header_value(msg.get("Subject", ""))
+        from_raw   = self.decode_header_value(msg.get("From", ""))
+        to_field   = self.decode_header_value(msg.get("To", ""))
+        cc_field   = self.decode_header_value(msg.get("Cc", ""))
+        date_str   = msg.get("Date", "")
+        message_id = msg.get("Message-ID", "")
+
+        sender_name, sender_email = self._split_address(from_raw)
+
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(date_str)
+            date_norm = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            date_norm = date_str[:19] if date_str else ""
+
+        # UID aus dem Flags-String extrahieren
+        uid_m = re.search(r"UID (\d+)", flags_str)
+        uid   = uid_m.group(1) if uid_m else ""
+
+        # Größe
+        size_m = re.search(r"RFC822\.SIZE (\d+)", flags_str)
+        size   = int(size_m.group(1)) if size_m else 0
+
+        return {
+            "uid":         uid,
+            "subject":     subject,
+            "sender":      sender_email,
+            "sender_name": sender_name,
+            "recipients":  to_field,
+            "cc":          cc_field,
+            "date":        date_norm,
+            "body_text":   "",     # wird lazy geladen
+            "body_html":   "",
+            "has_attach":  0,
+            "message_id":  message_id,
+            "is_read":     int("\\Seen"    in flags_str),
+            "is_flagged":  int("\\Flagged" in flags_str),
+            "size":        size,
+        }
 
     # ------------------------------------------------------------------ #
     #  Operationen                                                        #

@@ -315,5 +315,6 @@
   "auth_retry": "Erneut verbinden",
   "auth_save_ok": "Zugangsdaten gespeichert.",
   "fetch_running": "Nachrichten werden abgerufen…",
-  "send_running": "Nachrichten werden gesendet…"
+  "send_running": "Nachrichten werden gesendet…",
+  "folder_outbox": "Postausgang"
 }

@@ -111,13 +111,66 @@ class DatabaseManager:
         # Ersteinrichtung erfolgt über SetupDialog beim ersten Start.
 
     def _migrate_existing_schema(self):
-        """Ergänzt fehlende Spalten in bestehenden Datenbanken (Vorwärts-Migration)."""
+        """Ergänzt fehlende Spalten und bereinigt Duplikate."""
         conn = self._get_structure_conn()
         cols = [r[1] for r in conn.execute("PRAGMA table_info(mails)").fetchall()]
-        # body_html fehlt in sehr alten Versionen
         if "body_html" not in cols:
             conn.execute("ALTER TABLE mails ADD COLUMN body_html TEXT DEFAULT ''")
             conn.commit()
+
+        # imap_path-Spalte in folders hinzufügen falls fehlend
+        fcols = [r[1] for r in conn.execute("PRAGMA table_info(folders)").fetchall()]
+        if "imap_path" not in fcols:
+            conn.execute("ALTER TABLE folders ADD COLUMN imap_path TEXT")
+            conn.commit()
+
+        # Duplikate bereinigen: bei IMAP-Konten Ordner ohne imap_path entfernen
+        # wenn bereits ein Ordner des gleichen Typs MIT imap_path existiert
+        try:
+            acc_conn = self._get_accounts_conn()
+            imap_accounts = [r[0] for r in acc_conn.execute(
+                "SELECT id FROM accounts WHERE protocol NOT IN ('LOCAL', 'POP3')"
+            ).fetchall()]
+            for acc_id in imap_accounts:
+                mb = conn.execute(
+                    "SELECT id FROM mailboxes WHERE account_id=?", (acc_id,)
+                ).fetchone()
+                if not mb:
+                    continue
+                mb_id = mb[0]
+                # Ordner mit imap_path (Server-Ordner)
+                server_types = {r[0] for r in conn.execute(
+                    "SELECT folder_type FROM folders "
+                    "WHERE mailbox_id=? AND imap_path IS NOT NULL AND imap_path != ''",
+                    (mb_id,)
+                ).fetchall()}
+                # Platzhalter-Ordner (gleicher Typ, kein imap_path) löschen
+                for ftype in server_types:
+                    if not ftype or ftype == "outbox":
+                        continue
+                    dupes = conn.execute(
+                        "SELECT id FROM folders "
+                        "WHERE mailbox_id=? AND folder_type=? "
+                        "AND (imap_path IS NULL OR imap_path='')",
+                        (mb_id, ftype)
+                    ).fetchall()
+                    for (dup_id,) in dupes:
+                        # Mails in den Server-Ordner verschieben
+                        server_folder = conn.execute(
+                            "SELECT id FROM folders "
+                            "WHERE mailbox_id=? AND folder_type=? "
+                            "AND imap_path IS NOT NULL AND imap_path != ''",
+                            (mb_id, ftype)
+                        ).fetchone()
+                        if server_folder:
+                            conn.execute(
+                                "UPDATE mails SET folder_id=? WHERE folder_id=?",
+                                (server_folder[0], dup_id)
+                            )
+                        conn.execute("DELETE FROM folders WHERE id=?", (dup_id,))
+            conn.commit()
+        except Exception:
+            pass
 
     def _create_accounts_schema(self):
         conn = self._get_accounts_conn()
@@ -1378,29 +1431,25 @@ class DatabaseManager:
                    (account_id, data["name"], data["email"]))
         mb_id = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # Ordnerstruktur je nach Protokoll
+        # Ordnerstruktur je nach Protokoll (wie Thunderbird)
         if data.get("protocol", "IMAP") == "LOCAL":
-            # Lokale Ordner: wie Thunderbird (kein Spam, kein Archiv, dafür Postausgang)
+            # Lokale Ordner: feste Struktur, keine Server-Synchronisierung
             folders = [
-                ("Posteingang", "inbox"),
-                ("Entwürfe",    "drafts"),
-                ("Gesendet",    "sent"),
-                ("Papierkorb",  "trash"),
-                ("Postausgang", "outbox"),
+                ("Posteingang", "inbox",   None),
+                ("Entwürfe",    "drafts",  None),
+                ("Gesendet",    "sent",    None),
+                ("Papierkorb",  "trash",   None),
+                ("Postausgang", "outbox",  None),
             ]
-        else:
-            # IMAP/POP3-Konto: vollständige Ordnerstruktur
-            folders = [
-                ("Posteingang", "inbox"),   ("Gesendet",  "sent"),
-                ("Entwürfe",    "drafts"),  ("Papierkorb","trash"),
-                ("Spam",        "spam"),    ("Archiv",    "archive"),
-            ]
-        for fname, ftype in folders:
-            sc.execute(
-                "INSERT INTO folders (mailbox_id,parent_id,name,folder_type,unread) "
-                "VALUES (?,NULL,?,?,0)",
-                (mb_id, fname, ftype)
-            )
+            for fname, ftype, imap_path in folders:
+                sc.execute(
+                    "INSERT INTO folders (mailbox_id,parent_id,name,folder_type,imap_path,unread) "
+                    "VALUES (?,NULL,?,?,?,0)",
+                    (mb_id, fname, ftype, imap_path)
+                )
+        # IMAP/POP3: KEINE Ordner vorab anlegen.
+        # Ordner werden beim ersten Fetch vom Server abgerufen und
+        # in _sync_imap_folders angelegt (Thunderbird-Verhalten).
         sc.commit()
         return account_id
 

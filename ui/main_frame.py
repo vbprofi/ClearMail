@@ -106,8 +106,34 @@ class MainFrame(wx.Frame):
 
     def _build_status_bar(self):
         self.status_bar = self.CreateStatusBar(3)
-        self.status_bar.SetStatusWidths([-3, -1, -1])
+        self.status_bar.SetStatusWidths([-3, 160, -1])
         self.status_bar.SetStatusText(tr("status_ready"), 0)
+        # Fortschrittsleiste in Statusbar-Feld 1
+        self._gauge = wx.Gauge(self.status_bar, range=100,
+                               style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
+        self._gauge.Hide()
+        self.status_bar.Bind(wx.EVT_SIZE, self._on_statusbar_size)
+
+    def _on_statusbar_size(self, event):
+        rect = self.status_bar.GetFieldRect(1)
+        self._gauge.SetPosition((rect.x + 2, rect.y + 2))
+        self._gauge.SetSize((rect.width - 4, rect.height - 4))
+        event.Skip()
+
+    def _show_gauge(self, pct: int):
+        if pct < 0:
+            self._gauge.Pulse()
+        else:
+            self._gauge.SetValue(min(pct, 100))
+        self._gauge.Show()
+        # Gauge neu positionieren
+        rect = self.status_bar.GetFieldRect(1)
+        self._gauge.SetPosition((rect.x + 2, rect.y + 2))
+        self._gauge.SetSize((rect.width - 4, rect.height - 4))
+
+    def _hide_gauge(self):
+        self._gauge.Hide()
+        self._gauge.SetValue(0)
 
     def _build_layout(self):
         self.main_splitter  = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE | wx.SP_3D)
@@ -258,7 +284,8 @@ class MainFrame(wx.Frame):
 
             # „Als gelesen markieren nach X Sekunden"
             delay_s = int(self.controller.get_setting("mark_read_after", "0"))
-            if delay_s > 0 and not int(mail.get("is_read") or 0):
+            mail_d  = dict(mail)
+            if delay_s > 0 and not int(mail_d.get("is_read") or 0):
                 self._mark_read_timer = wx.CallLater(
                     delay_s * 1000, self._auto_mark_read, mail_id
                 )
@@ -512,21 +539,19 @@ class MainFrame(wx.Frame):
 
         def _done(count):
             self.mi_fetch.Enable(True)
+            self._hide_gauge()
             self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
-            # Baumstruktur mit neuen IMAP-Ordnern aktualisieren
             self.folder_panel.reload()
-            # Mailliste aktualisieren
             if self._selected_folder_id:
                 mails = self.controller.get_mails(self._selected_folder_id)
                 self.mail_list_panel.load_mails(mails)
-                if self._selected_folder_id:
-                    self.folder_panel.refresh_folder_unread(self._selected_folder_id)
-            # Letzten Ordner wiederherstellen falls noch keiner ausgewählt
+                self.folder_panel.refresh_folder_unread(self._selected_folder_id)
             if not self._selected_folder_id:
                 self._restore_last_folder()
 
         def _error(msg, is_auth):
             self.mi_fetch.Enable(True)
+            self._hide_gauge()
             self.status_bar.SetStatusText("", 0)
             if is_auth:
                 self._handle_auth_error(msg, accs)
@@ -534,8 +559,9 @@ class MainFrame(wx.Frame):
                 wx.MessageBox(tr("imap_fetch_err", error=msg),
                               tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
-        def _progress(msg):
+        def _progress(msg, pct=-1, total=0):
             self.status_bar.SetStatusText(msg, 0)
+            self._show_gauge(pct)
 
         ProtocolWorker(
             fn=self.controller.fetch_new_mails,
@@ -553,6 +579,7 @@ class MainFrame(wx.Frame):
 
         def _done(count):
             self.mi_send_outbox.Enable(True)
+            self._hide_gauge()
             self.status_bar.SetStatusText(
                 tr("outbox_empty") if count == 0 else tr("smtp_send_ok", count=count), 0)
             self.folder_panel.reload()
@@ -562,6 +589,7 @@ class MainFrame(wx.Frame):
 
         def _error(msg, is_auth):
             self.mi_send_outbox.Enable(True)
+            self._hide_gauge()
             self.status_bar.SetStatusText("", 0)
             accs = [a for a in self.controller.get_accounts()
                     if dict(a).get("protocol", "LOCAL") != "LOCAL"]
@@ -571,8 +599,9 @@ class MainFrame(wx.Frame):
                 wx.MessageBox(tr("smtp_send_err", error=msg),
                               tr("error_title"), wx.OK | wx.ICON_ERROR, self)
 
-        def _progress(msg):
+        def _progress(msg, pct=-1, total=0):
             self.status_bar.SetStatusText(msg, 0)
+            self._show_gauge(pct)
 
         ProtocolWorker(
             fn=self.controller.send_outbox,

@@ -106,9 +106,18 @@ class FolderPanel(wx.Panel):
             self.tree.Expand(mb_item)
 
     def _add_folder_items(self, parent_item, folders, parent_id):
-        for f in folders:
-            if f["parent_id"] != parent_id:
-                continue
+        # Thunderbird-Reihenfolge: inbox zuerst, archiv zuletzt
+        FOLDER_ORDER = {
+            "inbox": 0, "sent": 1, "drafts": 2, "outbox": 3,
+            "trash": 4, "spam": 5, "archive": 6, "custom": 7,
+        }
+        # Nur Ordner dieser Ebene, sortiert nach Typ dann Name
+        level = [f for f in folders if f["parent_id"] == parent_id]
+        level.sort(key=lambda f: (
+            FOLDER_ORDER.get(f["folder_type"] or "custom", 7),
+            (f["name"] or "").lower()
+        ))
+        for f in level:
             unread   = f["unread"] or 0
             icon_idx = FOLDER_TYPE_ICONS.get(f["folder_type"], ICON_FOLDER)
             label    = f["name"] if not unread else f"{f['name']} ({unread})"
