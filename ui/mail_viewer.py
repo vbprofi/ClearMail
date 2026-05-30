@@ -1,13 +1,6 @@
 """
-MailViewerFrame – Eigenes Fenster zur Darstellung einer E-Mail.
-
-Verhalten:
-  - HTML-Mails: Das html_widget ersetzt die TextCtrl vollständig
-    wenn "HTML-Mails rendern" aktiv ist.
-  - Toggle-Button schaltet zwischen HTML und Text um.
-  - HTML-Widget erhält beim Öffnen automatisch den Fokus.
-  - Tab-Navigation durch alle Header-Felder.
-  - Anhang-Liste mit Kontextmenü.
+MailViewerFrame – v8-Ansatz: wx.Simplebook mit TextCtrl (Seite 0) + HTML-Widget (Seite 1).
+ESC/Tab via _on_all_keys (kombinierter Handler an Frame + _book + _html_widget).
 """
 
 import wx
@@ -26,11 +19,9 @@ class MailViewerFrame(wx.Frame):
             size=(820, 650),
             style=wx.DEFAULT_FRAME_STYLE
         )
-        self.mail       = mail
-        self.controller = controller or self._find_controller()
-        self._html_mode = False
-
-        # HTML-Backend und Widget – werden in _build_ui erstellt
+        self.mail          = mail
+        self.controller    = controller or self._find_controller()
+        self._html_mode    = False
         self._html_backend = "textctrl"
         self._html_widget  = None
 
@@ -64,17 +55,16 @@ class MailViewerFrame(wx.Frame):
         outer.Add(grid, 0, wx.EXPAND | wx.ALL, 8)
         outer.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
-        # ---- Body-Bereich mit wx.Simplebook ----
-        # Simplebook zeigt immer NUR eine Seite – die anderen sind für
-        # Screenreader komplett unsichtbar (nicht im AT-Baum).
-        # Seite 0 = Plaintext, Seite 1 = HTML-Widget
+        # ---- Body: wx.Simplebook ----
+        # Seite 0 = TextCtrl (Plaintext)
+        # Seite 1 = HTML-Widget (WebView / HtmlWindow / TextCtrl-Fallback)
         lbl_body = wx.StaticText(panel, label=tr("preview_body"))
         outer.Add(lbl_body, 0, wx.LEFT | wx.TOP, 8)
 
         self._book = wx.Simplebook(panel)
         outer.Add(self._book, 1, wx.EXPAND | wx.ALL, 8)
 
-        # Seite 0: Plaintext-TextCtrl
+        # Seite 0: TextCtrl (initial sichtbar)
         self.txt_body = wx.TextCtrl(
             self._book,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_AUTO_URL | wx.BORDER_SUNKEN
@@ -84,12 +74,13 @@ class MailViewerFrame(wx.Frame):
             10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         self._book.AddPage(self.txt_body, "Text")
 
-        # Seite 1: HTML-Widget
+        # Seite 1: HTML-Widget – NACH outer.Add() erstellen damit _book
+        # bereits im Window-Tree verankert ist (nötig für WebView/HtmlWindow)
         self._html_widget, self._html_backend = create_html_widget(self._book)
         self._html_widget.SetName("HTML-Nachrichteninhalt")
         self._book.AddPage(self._html_widget, "HTML")
 
-        # Seite 0 initial aktiv (Plaintext)
+        # Initial: Seite 0
         self._book.SetSelection(0)
 
         # ---- Anhang-Liste ----
@@ -100,8 +91,7 @@ class MailViewerFrame(wx.Frame):
         asizer.Add(lbl_a, 0, wx.BOTTOM, 4)
         self.list_attach = wx.ListCtrl(
             self.attach_panel,
-            style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL
-        )
+            style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL)
         self.list_attach.SetName("Anhang-Liste")
         self.list_attach.InsertColumn(0, "Dateiname", width=260)
         self.list_attach.InsertColumn(1, "Typ",       width=130)
@@ -128,13 +118,12 @@ class MailViewerFrame(wx.Frame):
 
         panel.SetSizer(outer)
 
-        # Events
-        self.btn_toggle.Bind(wx.EVT_BUTTON,  self._on_toggle_html)
-        btn_reply.Bind(wx.EVT_BUTTON,   self._on_reply)
-        btn_forward.Bind(wx.EVT_BUTTON, self._on_forward)
-        btn_close.Bind(wx.EVT_BUTTON,   lambda e: self.Close())
-        self.list_attach.Bind(wx.EVT_CONTEXT_MENU,         self._on_attach_ctx)
-        self.list_attach.Bind(wx.EVT_LIST_ITEM_ACTIVATED,  self._on_attach_open)
+        # ---- Events ----
+        # Kombinierter Handler an Frame + _book + _html_widget
+        # → ESC funktioniert auch wenn WebView/HtmlWindow den Fokus hat
+        self.Bind(wx.EVT_CHAR_HOOK,        self._on_all_keys)
+        self._book.Bind(wx.EVT_CHAR_HOOK,  self._on_all_keys)
+        self._html_widget.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
 
         id_esc = wx.NewIdRef()
         self.SetAcceleratorTable(wx.AcceleratorTable([
@@ -142,14 +131,13 @@ class MailViewerFrame(wx.Frame):
         ]))
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), id=id_esc)
 
-        # EINEN kombinierten EVT_CHAR_HOOK am Frame (Tab + Escape)
-        self.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
-        # Direkt auf _book und _html_widget binden – WebView leitet Frame-Events
-        # nicht immer weiter, daher zusätzliche direkte Bindung notwendig
-        self._book.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
-        self._html_widget.Bind(wx.EVT_CHAR_HOOK, self._on_all_keys)
+        self.btn_toggle.Bind(wx.EVT_BUTTON,  self._on_toggle_html)
+        btn_reply.Bind(wx.EVT_BUTTON,   self._on_reply)
+        btn_forward.Bind(wx.EVT_BUTTON, self._on_forward)
+        btn_close.Bind(wx.EVT_BUTTON,   lambda e: self.Close())
+        self.list_attach.Bind(wx.EVT_CONTEXT_MENU,        self._on_attach_ctx)
+        self.list_attach.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_attach_open)
 
-        # Tab-Felder (für Screenreader-Navigation)
         self._tab_fields = [
             self.txt_body, self.txt_from, self.txt_to,
             self.txt_cc, self.txt_subject, self.txt_date,
@@ -157,7 +145,6 @@ class MailViewerFrame(wx.Frame):
 
     @staticmethod
     def _hdr_field(parent, grid, label_text: str) -> wx.TextCtrl:
-        """Label zuerst (HWND-Reihenfolge), dann TextCtrl."""
         lbl  = wx.StaticText(parent, label=label_text, size=(70, -1),
                              style=wx.ALIGN_RIGHT | wx.ST_NO_AUTORESIZE)
         ctrl = wx.TextCtrl(parent, style=wx.TE_READONLY | wx.BORDER_SIMPLE)
@@ -174,7 +161,6 @@ class MailViewerFrame(wx.Frame):
     def _s(v, default=""): return default if v is None else str(v)
 
     def _populate(self, mail: dict):
-        """Füllt alle Felder und wählt den richtigen Anzeigemodus."""
         sn = self._s(mail.get("sender_name"))
         se = self._s(mail.get("sender"))
         self.txt_from.SetValue(f"{sn} <{se}>" if sn else se)
@@ -187,14 +173,13 @@ class MailViewerFrame(wx.Frame):
         body_text = self._s(mail.get("body_text"))
         has_html  = bool(body_html.strip())
 
-        # Toggle-Button nur anzeigen wenn HTML vorhanden
         self.btn_toggle.Show(has_html)
 
+        render = self._get_render_setting()
+
         if self._get_render_setting() and has_html:
-            # HTML-Modus: Seite 1 (HTML-Widget) aktivieren
             self._activate_html_mode(body_html)
         else:
-            # Text-Modus: HTML-Inhalt hat Vorrang (vollständiger Text)
             plaintext = html_to_text(body_html) if body_html else body_text
             self.txt_body.SetValue(plaintext)
             self.txt_body.SetInsertionPoint(0)
@@ -203,7 +188,6 @@ class MailViewerFrame(wx.Frame):
             self._update_toggle_label()
             wx.CallAfter(self.txt_body.SetFocus)
 
-        # Anhänge befüllen
         attachments = mail.get("attachments") or []
         if attachments or mail.get("has_attach"):
             self.attach_panel.Show()
@@ -216,19 +200,19 @@ class MailViewerFrame(wx.Frame):
         self.Layout()
 
     def _activate_html_mode(self, body_html: str):
-        """Wechselt zu Seite 1 (HTML-Widget) im Simplebook."""
+        """Seite 1 im Simplebook aktivieren, Inhalt via CallAfter setzen."""
         self._html_mode = True
         self._book.SetSelection(1)
         self._update_toggle_label()
-        # Inhalt und Fokus nach erstem Paint setzen (WebView-Anforderung)
         wx.CallAfter(self._do_set_html, body_html)
 
     def _do_set_html(self, body_html: str):
-        """Setzt HTML-Inhalt und Fokus – läuft nach Show() via CallAfter."""
+        """Setzt HTML-Inhalt – läuft nach Show() via CallAfter."""
+        if not self._html_mode:
+            return
         try:
             set_html_content(self._html_widget, body_html, self._html_backend)
         except Exception:
-            # Fallback: zurück zu Plaintext-Seite
             self._book.SetSelection(0)
             self.txt_body.SetValue(html_to_text(body_html))
             self.txt_body.SetInsertionPoint(0)
@@ -236,9 +220,18 @@ class MailViewerFrame(wx.Frame):
             self._update_toggle_label()
             wx.CallAfter(self.txt_body.SetFocus)
             return
-        # Fokus auf HTML-Widget
+        # Fokus auf HTML-Widget: WebView2 braucht nach SetPage etwas Zeit.
+        # CallLater(200ms) gibt dem Browser Zeit zum Rendern, dann SetFocus.
+        if self._html_backend == "webview":
+            wx.CallLater(200, self._focus_html_widget)
+        else:
+            wx.CallAfter(self._focus_html_widget)
+
+    def _focus_html_widget(self):
+        """Setzt Fokus auf das HTML-Widget (sicher via CallAfter/CallLater)."""
         try:
-            self._html_widget.SetFocus()
+            if self._html_mode and self._html_widget.IsShown():
+                self._html_widget.SetFocus()
         except Exception:
             pass
 
@@ -248,7 +241,6 @@ class MailViewerFrame(wx.Frame):
         return False
 
     def _switch_mode(self, html_on: bool):
-        """Toggle-Button: schaltet zwischen Seite 0 (Text) und Seite 1 (HTML)."""
         body_html = self._s(self.mail.get("body_html"))
         body_text = self._s(self.mail.get("body_text"))
         self._html_mode = html_on
@@ -258,15 +250,16 @@ class MailViewerFrame(wx.Frame):
             self._book.SetSelection(1)
             try:
                 set_html_content(self._html_widget, body_html, self._html_backend)
-                wx.CallAfter(self._html_widget.SetFocus)
+                if self._html_backend == "webview":
+                    wx.CallLater(200, self._focus_html_widget)
+                else:
+                    wx.CallAfter(self._focus_html_widget)
             except Exception:
-                # Fallback
                 self._book.SetSelection(0)
                 self._html_mode = False
                 self._update_toggle_label()
         else:
             self._book.SetSelection(0)
-            # HTML-Inhalt hat Vorrang für vollständige Textdarstellung
             plaintext = html_to_text(body_html) if body_html else body_text
             self.txt_body.SetValue(plaintext)
             self.txt_body.SetInsertionPoint(0)
@@ -286,30 +279,20 @@ class MailViewerFrame(wx.Frame):
         self._switch_mode(not self._html_mode)
 
     def _on_all_keys(self, event: wx.KeyEvent):
-        """
-        Kombinierter Key-Handler für das gesamte Viewer-Fenster.
-        Gebunden an Frame + _book + _html_widget, damit ESC auch aus
-        wx.html2.WebView heraus funktioniert.
-
-        ESC  → Fenster schließen
-        Tab  → Header-Felder navigieren (nur wenn Fokus in _tab_fields)
-        """
+        """ESC schließt, Tab navigiert Header-Felder."""
         key = event.GetKeyCode()
-
         if key == wx.WXK_ESCAPE:
             self.Close()
-            return  # kein Skip → ESC wird nicht weitergegeben
-
+            return
         if key == wx.WXK_TAB:
             focused = self.FindFocus()
-            fields  = self._tab_fields
-            if focused in fields:
+            if focused in self._tab_fields:
                 shift    = event.ShiftDown()
-                idx      = fields.index(focused)
-                next_idx = (idx - 1) % len(fields) if shift else (idx + 1) % len(fields)
-                fields[next_idx].SetFocus()
-                return  # kein Skip → kein Standard-Tab-Sprung
-
+                idx      = self._tab_fields.index(focused)
+                next_idx = (idx - 1) % len(self._tab_fields) if shift \
+                           else (idx + 1) % len(self._tab_fields)
+                self._tab_fields[next_idx].SetFocus()
+                return
         event.Skip()
 
     # ------------------------------------------------------------------ #
@@ -355,7 +338,8 @@ class MailViewerFrame(wx.Frame):
     def _on_attach_save_all(self, event=None):
         atts = self.mail.get("attachments") or []
         if not atts:
-            wx.MessageBox("Keine Anhänge vorhanden.", tr("hint_title"), wx.OK, self); return
+            wx.MessageBox("Keine Anhänge vorhanden.", tr("hint_title"), wx.OK, self)
+            return
         with wx.DirDialog(self, "Zielordner für alle Anhänge:") as d:
             if d.ShowModal() != wx.ID_OK: return
             target = d.GetPath()

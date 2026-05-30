@@ -1,13 +1,15 @@
 """
 html_renderer.py – HTML-Darstellung für Mails
 
-Backends (in Priorität):
+Backends (Priorität):
   1. wx.html2.WebView  – Edge/WebKit (Windows: Edge WebView2, Linux: WebKitGTK)
-  2. wx.html.HtmlWindow – leichtes wx-eigenes HTML-Rendering (HTML3/CSS2)
+  2. wx.html.HtmlWindow – leichtes wx-eigenes HTML-Rendering
   3. wx.TextCtrl       – Plaintext-Fallback
 
-Vorschau-Panel:  immer html_to_text()  (reiner Text, kein Widget-Wechsel)
+Vorschau-Panel:  immer html_to_text()  (reiner Text)
 Viewer-Fenster:  HTML-Widget wenn render_html=1 und body_html vorhanden
+
+WICHTIG: Das Backend wird beim Erstellen des Widgets bestimmt, nicht vorher.
 """
 
 from __future__ import annotations
@@ -16,21 +18,15 @@ from html.parser import HTMLParser
 
 
 # ------------------------------------------------------------------ #
-#  HTML → Text (keine externen Bibliotheken)                          #
+#  HTML → Text                                                        #
 # ------------------------------------------------------------------ #
 
 class _HtmlToTextParser(HTMLParser):
-    # Block-Elemente → Zeilenumbruch
     BLOCK = {"p","div","br","h1","h2","h3","h4","h5","h6",
               "li","tr","blockquote","pre","hr","article","section",
               "header","footer","nav","figure","figcaption","td","th"}
-
-    # Container-Skip: Inhalt UND alle Kind-Tags werden übersprungen
-    # NUR echte Container (haben öffnendes UND schließendes Tag)
     SKIP_CONTAINER = {"script","style","head","noscript","iframe",
                       "object","embed","svg","canvas","select"}
-
-    # Void-Elemente: selbst-schließend, kein Endtag, kein Inhalt zu skippen
     VOID = {"area","base","br","col","embed","hr","img","input",
             "link","meta","param","source","track","wbr"}
 
@@ -42,8 +38,6 @@ class _HtmlToTextParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         t = tag.lower()
-
-        # Void-Elemente: niemals skip_depth erhöhen
         if t in self.VOID:
             if not self._skip_depth:
                 if t == "br":  self._parts.append("\n")
@@ -52,21 +46,11 @@ class _HtmlToTextParser(HTMLParser):
                     alt = next((v for n,v in attrs if n=="alt"), "")
                     if alt: self._parts.append(f"[Bild: {alt}]")
             return
-
-        # Container-Skip
         if t in self.SKIP_CONTAINER:
-            self._skip_depth += 1
-            return
-
-        if self._skip_depth:
-            return
-
-        if t == "pre":
-            self._pre_depth += 1
-
-        if t in self.BLOCK:
-            self._parts.append("\n")
-
+            self._skip_depth += 1; return
+        if self._skip_depth: return
+        if t == "pre": self._pre_depth += 1
+        if t in self.BLOCK: self._parts.append("\n")
         if t == "a":
             for name, val in attrs:
                 if name == "href" and val and val.startswith("http"):
@@ -74,23 +58,16 @@ class _HtmlToTextParser(HTMLParser):
 
     def handle_endtag(self, tag):
         t = tag.lower()
-        if t in self.VOID:
-            return  # Void-Elemente haben kein Endtag → ignorieren
+        if t in self.VOID: return
         if t in self.SKIP_CONTAINER:
-            self._skip_depth = max(0, self._skip_depth - 1)
-            return
-        if self._skip_depth:
-            return
-        if t == "pre":
-            self._pre_depth = max(0, self._pre_depth - 1)
-        if t in self.BLOCK:
-            self._parts.append("\n")
+            self._skip_depth = max(0, self._skip_depth-1); return
+        if self._skip_depth: return
+        if t == "pre": self._pre_depth = max(0, self._pre_depth-1)
+        if t in self.BLOCK: self._parts.append("\n")
 
     def handle_data(self, data):
-        if self._skip_depth:
-            return
-        if self._pre_depth:
-            self._parts.append(data)
+        if self._skip_depth: return
+        if self._pre_depth: self._parts.append(data)
         else:
             text = re.sub(r"[ \t]+", " ", data)
             text = re.sub(r"\n+",    " ", text)
@@ -100,16 +77,10 @@ class _HtmlToTextParser(HTMLParser):
         raw   = "".join(self._parts)
         raw   = re.sub(r"\n{3,}", "\n\n", raw)
         lines = [l.strip() for l in raw.splitlines()]
-        # Leere Zeilen am Anfang/Ende entfernen, max. 1 Leerzeile zwischen Blöcken
-        result = []
-        prev_empty = True
+        result = []; prev_empty = True
         for line in lines:
-            if line:
-                result.append(line)
-                prev_empty = False
-            elif not prev_empty:
-                result.append("")
-                prev_empty = True
+            if line:   result.append(line); prev_empty = False
+            elif not prev_empty: result.append(""); prev_empty = True
         return "\n".join(result).strip()
 
 
@@ -117,8 +88,7 @@ def html_to_text(html_str: str) -> str:
     if not html_str or not html_str.strip(): return ""
     if "<" not in html_str: return html_str
     try:
-        p = _HtmlToTextParser()
-        p.feed(html_str)
+        p = _HtmlToTextParser(); p.feed(html_str)
         result = p.get_text()
         return result if result else html_str
     except Exception:
@@ -126,85 +96,51 @@ def html_to_text(html_str: str) -> str:
 
 
 # ------------------------------------------------------------------ #
-#  Backend-Erkennung                                                  #
-# ------------------------------------------------------------------ #
-
-def detect_best_backend() -> str:
-    """
-    Ermittelt das beste verfügbare HTML-Backend.
-    Gibt 'webview', 'htmlwindow' oder 'textctrl' zurück.
-    Wird einmalig beim Import gecacht.
-    """
-    try:
-        import wx.html2
-        # Prüfen ob das Backend tatsächlich initialisierbar ist
-        # (auf manchen Systemen importierbar aber nicht nutzbar)
-        if hasattr(wx.html2, 'WebView'):
-            return "webview"
-    except Exception:
-        pass
-    try:
-        import wx.html
-        if hasattr(wx.html, 'HtmlWindow'):
-            return "htmlwindow"
-    except Exception:
-        pass
-    return "textctrl"
-
-
-# Einmal erkennen, dann cachen
-_BEST_BACKEND: str | None = None
-
-def get_backend() -> str:
-    global _BEST_BACKEND
-    if _BEST_BACKEND is None:
-        _BEST_BACKEND = detect_best_backend()
-    return _BEST_BACKEND
-
-
-# ------------------------------------------------------------------ #
-#  Widget erstellen                                                   #
+#  Widget erstellen – Backend wird beim Erstellen bestimmt           #
 # ------------------------------------------------------------------ #
 
 def create_html_widget(parent) -> tuple:
     """
-    Erstellt das HTML-Widget für den angegebenen Parent.
-    Gibt (widget, backend_name) zurück.
-
-    WICHTIG: Bei WebView muss SetPage() NACH Show() aufgerufen werden.
+    Erstellt das HTML-Widget. Gibt (widget, backend_name) zurück.
+    Versucht WebView → HtmlWindow → TextCtrl.
     """
-    backend = get_backend()
 
-    if backend == "webview":
-        try:
-            import wx.html2
-            ctrl = wx.html2.WebView.New(parent)
-            ctrl.SetName("HTML-Darstellung")
-            return ctrl, "webview"
-        except Exception:
-            pass  # Fallback
+    # Versuch 1: wx.html2.WebView
+    try:
+        import wx.html2
+        ctrl = wx.html2.WebView.New(parent)
+        ctrl.SetName("HTML-Darstellung (WebView)")
+        return ctrl, "webview"
+    except Exception:
+        pass
 
-    if backend in ("webview", "htmlwindow"):
-        try:
-            import wx.html
-            ctrl = wx.html.HtmlWindow(
-                parent,
-                style=wx.html.HW_SCROLLBAR_AUTO | wx.BORDER_SUNKEN
-            )
-            ctrl.SetName("HTML-Darstellung")
-            # Standard-Schrift anpassen
-            ctrl.SetStandardFonts(14)
-            return ctrl, "htmlwindow"
-        except Exception:
-            pass
+    # Versuch 2: wx.html.HtmlWindow
+    try:
+        import wx.html
+        ctrl = wx.html.HtmlWindow(
+            parent,
+            style=wx.html.HW_SCROLLBAR_AUTO | wx.BORDER_SUNKEN
+        )
+        ctrl.SetName("HTML-Darstellung (HtmlWindow)")
+        ctrl.SetStandardFonts(14)
+        return ctrl, "htmlwindow"
+    except Exception:
+        pass
 
-    # Letzter Fallback: TextCtrl
+    # Fallback: TextCtrl
     import wx
     ctrl = wx.TextCtrl(
         parent,
         style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_SUNKEN
     )
-    ctrl.SetName("Nachrichtentext")
+    ctrl.SetName("Nachrichtentext (Plaintext-Fallback)")
+    return ctrl, "textctrl"
+    import wx
+    ctrl = wx.TextCtrl(
+        parent,
+        style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_SUNKEN
+    )
+    ctrl.SetName("Nachrichtentext (Plaintext-Fallback)")
     return ctrl, "textctrl"
 
 
@@ -213,7 +149,7 @@ def create_html_widget(parent) -> tuple:
 # ------------------------------------------------------------------ #
 
 def set_html_content(widget, html_str: str, backend: str, base_url: str = ""):
-    """Setzt HTML-Inhalt je nach Backend."""
+    """Setzt HTML-Inhalt ins Widget – je nach Backend unterschiedliches API."""
     prepared = _prepare_html(html_str)
     try:
         if backend == "webview":
@@ -221,20 +157,20 @@ def set_html_content(widget, html_str: str, backend: str, base_url: str = ""):
         elif backend == "htmlwindow":
             widget.SetPage(prepared)
         else:
-            # TextCtrl-Fallback
+            # TextCtrl-Fallback: Text extrahieren
             widget.SetValue(html_to_text(html_str))
             widget.SetInsertionPoint(0)
-    except Exception as e:
-        # Wenn das Widget das HTML nicht verarbeiten kann → Plaintext
+    except Exception:
+        # Letzter Ausweg: Text extrahieren und in TextCtrl
         try:
-            if hasattr(widget, 'SetValue'):
+            if hasattr(widget, "SetValue"):
                 widget.SetValue(html_to_text(html_str))
         except Exception:
             pass
 
 
 def set_text_content(widget, text: str, backend: str):
-    """Setzt reinen Text ins HTML-Widget (als formatiertes HTML verpackt)."""
+    """Setzt reinen Text ins HTML-Widget."""
     escaped = _html_mod.escape(text or "")
     if backend == "webview":
         page = (f'<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
@@ -253,7 +189,7 @@ def set_text_content(widget, text: str, backend: str):
 
 
 # ------------------------------------------------------------------ #
-#  HTML aufbereiten (Thunderbird-ähnliches CSS injizieren)           #
+#  HTML aufbereiten (Thunderbird-ähnliches CSS)                      #
 # ------------------------------------------------------------------ #
 
 _BASE_CSS = """
@@ -282,12 +218,11 @@ td, th { padding: 4px 8px; }
 hr { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
 </style>
 """
-
 _CHARSET = '<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
 
 
 def _prepare_html(html_str: str) -> str:
-    """Bereitet HTML-Mail für die Anzeige vor (CSS + Charset injizieren)."""
+    """Bereitet HTML für die Anzeige vor: CSS + Charset injizieren."""
     if not html_str:
         return "<html><body></body></html>"
 
@@ -295,20 +230,17 @@ def _prepare_html(html_str: str) -> str:
     has_head = bool(re.search(r"<head[\s>]",  html_str, re.IGNORECASE))
 
     if has_html and has_head:
-        # CSS nach <head> injizieren
         return re.sub(
             r"(<head[^>]*>)",
             r"\1\n" + _CHARSET + "\n" + _BASE_CSS,
             html_str, count=1, flags=re.IGNORECASE
         )
     elif has_html:
-        # <html> ohne <head>
         return re.sub(
             r"(<html[^>]*>)",
             r"\1\n<head>\n" + _CHARSET + "\n" + _BASE_CSS + "\n</head>\n",
             html_str, count=1, flags=re.IGNORECASE
         )
     else:
-        # Nur Fragment
         return (f"<!DOCTYPE html><html><head>\n{_CHARSET}\n{_BASE_CSS}"
                 f"</head><body>\n{html_str}\n</body></html>")
