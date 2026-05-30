@@ -765,12 +765,14 @@ class ComposeDialog(wx.Dialog):
 
         # Mail zuerst im Postausgang (Lokale Ordner) speichern
         outbox_id = self.controller._get_outbox_folder_id()
+        from datetime import datetime as _dt
         mail_data = {
             "subject":    self.txt_subject.GetValue().strip(),
             "sender":     acc["email"],
             "sender_name":acc["name"],
             "recipients": to_str,
             "cc":         self.txt_cc.GetValue().strip(),
+            "date":       _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
             "body_text":  self.txt_body.GetValue(),
             "body_html":  "",
             "is_read":    1,
