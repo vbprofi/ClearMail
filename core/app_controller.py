@@ -228,3 +228,17 @@ class AppController:
         raise NotImplementedError("IMAP/POP3 noch nicht implementiert.")
     def send_mail(self, account_id: int, mail_data: dict):
         raise NotImplementedError("SMTP noch nicht implementiert.")
+
+    def is_first_run(self) -> bool:
+        return self.db.is_first_run()
+
+    def search_mails(self, query: str, field: str = "all",
+                     folder_id: int = None,
+                     date_from: str = None, date_to: str = None) -> list:
+        return self.db.search_mails(query, field, folder_id, date_from, date_to)
+
+    def copy_mail(self, mail_id: int, target_folder_id: int,
+                  source_folder_id: int = None) -> int:
+        result = self.db.copy_mail(mail_id, target_folder_id, source_folder_id)
+        self.db.update_folder_unread(target_folder_id)
+        return result

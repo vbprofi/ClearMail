@@ -184,6 +184,10 @@ class SettingsDialog(wx.Dialog):
             pg1, gs1, tr("settings_language"),
             lambda p: wx.Choice(p, choices=self._lang_labels),
             name=tr("settings_language"))
+        self.spn_mark_read = add_labeled_field(
+            pg1, gs1, tr("settings_mark_unread_after"),
+            lambda p: wx.SpinCtrl(p, min=0, max=120, initial=0),
+            name=tr("settings_mark_unread_after"))
         pg1.SetSizer(self._w(gs1))
         nb.AddPage(pg1, tr("settings_tab_general"))
 
@@ -260,6 +264,7 @@ class SettingsDialog(wx.Dialog):
     def _load(self):
         g = self.controller.get_setting
         self.chk_auto.SetValue(g("auto_fetch",      "0") == "1")
+        self.spn_mark_read.SetValue(int(g("mark_read_after", "0")))
         self.spn_interval.SetValue(int(g("fetch_interval", "10")))
         self.chk_html.SetValue(g("render_html",     "0") == "1")
         self.chk_confirm_del.SetValue(g("confirm_delete", "1") == "1")
@@ -278,6 +283,7 @@ class SettingsDialog(wx.Dialog):
         s   = self.controller.set_setting
         g   = self.controller.get_setting
         s("auto_fetch",     "1" if self.chk_auto.GetValue() else "0")
+        s("mark_read_after", str(self.spn_mark_read.GetValue()))
         s("fetch_interval", str(self.spn_interval.GetValue()))
         s("render_html",    "1" if self.chk_html.GetValue() else "0")
         s("confirm_delete", "1" if self.chk_confirm_del.GetValue() else "0")
@@ -523,18 +529,30 @@ class AboutDialog(wx.Dialog):
         title.SetFont(wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         sizer.Add(title, 0, wx.ALIGN_CENTER | wx.TOP, 20)
 
-        # Version aus version_info lesen – funktioniert in Entwicklung UND als .exe
-        # Da version_info.py jetzt via datas in _MEIPASS gebündelt wird,
-        # ist APP_VERSION auch in der kompilierten EXE korrekt.
+        # Version: bevorzugt direkt aus der EXE-VERSIONINFO (win32api oder struct).
+        # Fallback: version.txt → Entwicklungsumgebung.
+        # version_info.py liegt im App-Root; sys.path wird entsprechend erweitert.
+        version = "?"
         try:
-            from version_info import get_version
-            version = get_version()   # Immer frisch lesen (nicht gecachten APP_VERSION nutzen)
+            import sys as _sys, os as _os, importlib
+            # Mögliche Verzeichnisse für version_info.py
+            _dirs = []
+            _meipass = getattr(_sys, "_MEIPASS", None)
+            if _meipass: _dirs.append(_meipass)
+            # ui/ → ../ (App-Root)
+            _ui_dir  = _os.path.dirname(_os.path.abspath(__file__))
+            _app_dir = _os.path.dirname(_ui_dir)
+            for _d in (_app_dir, _ui_dir):
+                if _d and _d not in _sys.path:
+                    _sys.path.insert(0, _d)
+            # Importieren – ggf. neu laden falls bereits gecacht
+            if "version_info" in _sys.modules:
+                _vi = _sys.modules["version_info"]
+            else:
+                import version_info as _vi  # type: ignore
+            version = _vi.get_version()
         except Exception:
-            try:
-                from version_info import APP_VERSION
-                version = APP_VERSION
-            except Exception:
-                version = "?"
+            version = "?"
 
         info = wx.StaticText(panel,
             label=tr("about_version", version=version) + "\n\n" + tr("about_desc"),
@@ -627,3 +645,44 @@ class ComposeDialog(wx.Dialog):
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as d:
             if d.ShowModal() == wx.ID_OK:
                 wx.MessageBox(tr("attach_msg", count=len(d.GetPaths())), tr("hint_title"), wx.OK, self)
+
+
+# ================================================================== #
+#  SetupDialog – Ersteinrichtung beim ersten Start                    #
+# ================================================================== #
+
+class SetupDialog(wx.Dialog):
+    """Wird beim ersten Start angezeigt wenn noch kein Konto vorhanden ist."""
+
+    def __init__(self, parent, controller):
+        super().__init__(parent, title=tr("setup_title"), size=(480, 220),
+                         style=wx.DEFAULT_DIALOG_STYLE)
+        self.controller = controller
+        self._build_ui()
+        self.Centre()
+
+    def _build_ui(self):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        lbl = wx.StaticText(panel, label=tr("setup_title"))
+        lbl.SetFont(lbl.GetFont().Bold())
+        sizer.Add(lbl, 0, wx.ALL, 14)
+
+        desc = wx.StaticText(panel, label=tr("setup_desc"))
+        sizer.Add(desc, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 14)
+
+        sizer.AddStretchSpacer()
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_create = wx.Button(panel, wx.ID_OK,     tr("setup_create"))
+        btn_skip   = wx.Button(panel, wx.ID_CANCEL, tr("setup_skip"))
+        btn_create.SetDefault()
+        btn_row.Add(btn_create, 0, wx.RIGHT, 8)
+        btn_row.Add(btn_skip)
+        sizer.Add(btn_row, 0, wx.ALIGN_RIGHT | wx.ALL, 14)
+
+        panel.SetSizer(sizer)
+
+# Re-export FolderPickerDialog for import from dialogs
+from ui.folder_picker import FolderPickerDialog

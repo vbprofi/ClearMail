@@ -9,9 +9,11 @@ from ui.folder_panel import FolderPanel
 from ui.mail_list_panel import MailListPanel
 from ui.mail_preview_panel import MailPreviewPanel
 from ui.mail_viewer import MailViewerFrame
+from ui.search_dialog import SearchDialog
 from ui.dialogs import (
     AccountDialog, SettingsDialog, PrintPreviewDialog,
-    PGPDialog, AddonManagerDialog, AboutDialog, ComposeDialog
+    PGPDialog, AddonManagerDialog, AboutDialog, ComposeDialog,
+    SetupDialog, FolderPickerDialog
 )
 
 
@@ -26,6 +28,7 @@ class MainFrame(wx.Frame):
         self._selected_mail_id    = None
         self._selected_mailbox_id = None
         self._selected_folder_name = ""
+        self._mark_read_timer      = None   # wx.CallLater für „Als gelesen nach X Sek."
 
         self._build_menu()
         self._build_status_bar()
@@ -125,9 +128,13 @@ class MainFrame(wx.Frame):
     def _bind_events(self):
         id_f6       = wx.NewIdRef()
         id_shift_f6 = wx.NewIdRef()
+        id_search   = wx.NewIdRef()
+        self.Bind(wx.EVT_MENU, self._on_search_mail, id=id_search)
+        self.Bind(wx.EVT_MENU, self._on_search_mail, self.mi_find)
         self.SetAcceleratorTable(wx.AcceleratorTable([
-            (wx.ACCEL_NORMAL, wx.WXK_F6, id_f6),
-            (wx.ACCEL_SHIFT,  wx.WXK_F6, id_shift_f6),
+            (wx.ACCEL_NORMAL, wx.WXK_F6,   id_f6),
+            (wx.ACCEL_SHIFT,  wx.WXK_F6,   id_shift_f6),
+            (wx.ACCEL_CTRL,   ord("F"),     id_search),
         ]))
         self.Bind(wx.EVT_MENU, lambda e: self._focus_next_panel(), id=id_f6)
         self.Bind(wx.EVT_MENU, lambda e: self._focus_prev_panel(), id=id_shift_f6)
@@ -233,6 +240,12 @@ class MainFrame(wx.Frame):
         self.controller.set_setting("last_folder_id", str(folder_id))
 
     def _on_mail_selected(self, mail_id: int):
+        # Laufenden Timer abbrechen (andere Mail angeklickt)
+        if self._mark_read_timer:
+            try: self._mark_read_timer.Stop()
+            except Exception: pass
+            self._mark_read_timer = None
+
         self._selected_mail_id = mail_id
         mail = self.controller.get_mail(mail_id, self._selected_folder_id)
         if mail:
@@ -240,6 +253,26 @@ class MainFrame(wx.Frame):
             self.mail_list_panel.refresh_mail_read(mail_id)
             if self._selected_folder_id:
                 self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+
+            # „Als gelesen markieren nach X Sekunden"
+            delay_s = int(self.controller.get_setting("mark_read_after", "0"))
+            if delay_s > 0 and not int(mail.get("is_read") or 0):
+                self._mark_read_timer = wx.CallLater(
+                    delay_s * 1000, self._auto_mark_read, mail_id
+                )
+
+    def _auto_mark_read(self, mail_id: int):
+        """Wird nach Ablauf des Timers aufgerufen – markiert Mail als gelesen."""
+        self._mark_read_timer = None
+        if self._selected_mail_id != mail_id:
+            return  # Nutzer hat inzwischen andere Mail gewählt
+        fid = self._selected_folder_id
+        self.controller.mark_mail_read(mail_id, True, folder_id=fid)
+        if fid:
+            self.controller.db.update_folder_unread(fid)
+        self.mail_list_panel.refresh_mail_read(mail_id, force_read=True)
+        if fid:
+            self.folder_panel.refresh_folder_unread(fid)
 
     def _on_open_mail_viewer(self, mail_id: int):
         """Öffnet eine Mail in einem eigenen Fenster (Doppelklick / Enter)."""
@@ -327,6 +360,43 @@ class MainFrame(wx.Frame):
         if mail:
             self.controller.mark_mail_flagged(self._selected_mail_id, not bool(mail["is_flagged"]))
             self.mail_list_panel.reload_current_folder()
+
+    def _on_copy_mail(self, event=None):
+        """Mail in einen anderen Ordner kopieren."""
+        if not self._selected_mail_id: return
+        dlg = FolderPickerDialog(self, self.controller,
+                                 title=tr("ctx_copy_to_folder"))
+        if dlg.ShowModal() == wx.ID_OK:
+            target_fid = dlg.selected_folder_id
+            if target_fid:
+                self.controller.copy_mail(
+                    self._selected_mail_id, target_fid,
+                    source_folder_id=self._selected_folder_id)
+                self.folder_panel.refresh_folder_unread(target_fid)
+        dlg.Destroy()
+
+    def _on_move_mail(self, event=None):
+        """Mail in einen anderen Ordner verschieben."""
+        if not self._selected_mail_id: return
+        dlg = FolderPickerDialog(self, self.controller,
+                                 title=tr("ctx_move_to"))
+        if dlg.ShowModal() == wx.ID_OK:
+            target_fid = dlg.selected_folder_id
+            if target_fid and target_fid != self._selected_folder_id:
+                self.controller.move_mail(
+                    self._selected_mail_id, target_fid,
+                    source_folder_id=self._selected_folder_id)
+                if self._selected_folder_id:
+                    self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+                self.folder_panel.refresh_folder_unread(target_fid)
+                self.mail_list_panel.remove_mail(self._selected_mail_id)
+                self.mail_preview_panel.clear()
+        dlg.Destroy()
+
+    def _on_search(self, event=None):
+        """Suchfenster öffnen."""
+        dlg = SearchDialog(self, self.controller)
+        dlg.Show()
 
     def _on_refresh(self, event):
         if self._selected_folder_id:
@@ -474,6 +544,9 @@ class MainFrame(wx.Frame):
             (tr("ctx_save_email"),  self._on_save_email),
             (tr("ctx_save_txt"),    self._on_save_txt),
             None,
+            (tr("ctx_copy_to"),     self._on_copy_mail),
+            (tr("ctx_move_to"),     self._on_move_mail),
+            None,
             (tr("ctx_mark_read"),   lambda e: self._on_mark(True)),
             (tr("ctx_mark_unread"), lambda e: self._on_mark(False)),
             (tr("ctx_flag"),        self._on_flag),
@@ -488,6 +561,11 @@ class MainFrame(wx.Frame):
                 mi = menu.Append(wx.ID_ANY, lbl)
                 self.Bind(wx.EVT_MENU, fn, mi)
 
+        # ---- Kopieren / Verschieben nach Ordner ----
+        menu.AppendSeparator()
+        self._append_folder_submenu(menu, tr("ctx_copy_to"), copy=True)
+        self._append_folder_submenu(menu, tr("ctx_move_to"), copy=False)
+
         for entry in self.controller.addon_mgr.get_all_menu_items():
             menu.AppendSeparator()
             mi = menu.Append(wx.ID_ANY, entry["label"])
@@ -497,6 +575,76 @@ class MainFrame(wx.Frame):
         self.PopupMenu(menu)
         menu.Destroy()
 
+    def _append_folder_submenu(self, parent_menu: wx.Menu, label: str, copy: bool):
+        """Erstellt ein Untermenü mit allen Postfächern und Ordnern."""
+        sub = wx.Menu()
+        mailboxes = self.controller.get_mailboxes()
+        if not mailboxes:
+            mi = sub.Append(wx.ID_ANY, "–")
+            mi.Enable(False)
+        else:
+            for mb in mailboxes:
+                mb_sub = wx.Menu()
+                folders = self.controller.get_folders(mb["id"])
+                for f in folders:
+                    fd   = dict(f)
+                    lbl  = ("  " * (1 if fd.get("parent_id") else 0)) + fd["name"]
+                    mi   = mb_sub.Append(wx.ID_ANY, lbl)
+                    fid  = fd["id"]
+                    sfid = self._selected_folder_id
+                    smid = self._selected_mail_id
+                    if copy:
+                        self.Bind(wx.EVT_MENU,
+                            lambda e, t=fid, s=sfid, m=smid: self._copy_mail(m, t, s), mi)
+                    else:
+                        self.Bind(wx.EVT_MENU,
+                            lambda e, t=fid, s=sfid, m=smid: self._move_mail(m, t, s), mi)
+                sub.AppendSubMenu(mb_sub, mb["name"])
+        parent_menu.AppendSubMenu(sub, label)
+
+    def _copy_mail(self, mail_id: int, target_folder_id: int, source_folder_id: int):
+        """Kopiert eine Mail in einen anderen Ordner (Duplikat anlegen)."""
+        if not mail_id or target_folder_id == source_folder_id:
+            return
+        mail = self.controller.db.get_mail(mail_id, source_folder_id)
+        if not mail:
+            return
+        d = dict(mail)
+        d.pop("id", None)
+        d["folder_id"] = target_folder_id
+        self.controller.db.insert_mail(target_folder_id, d)
+        self.controller.db.update_folder_unread(target_folder_id)
+        self.folder_panel.refresh_folder_unread(target_folder_id)
+
+    def _move_mail(self, mail_id: int, target_folder_id: int, source_folder_id: int):
+        """Verschiebt eine Mail in einen anderen Ordner."""
+        if not mail_id or target_folder_id == source_folder_id:
+            return
+        self.controller.move_mail(mail_id, target_folder_id, source_folder_id)
+        self.controller.db.update_folder_unread(source_folder_id)
+        self.controller.db.update_folder_unread(target_folder_id)
+        self.mail_list_panel.remove_mail(mail_id)
+        self.folder_panel.refresh_folder_unread(source_folder_id)
+        self.folder_panel.refresh_folder_unread(target_folder_id)
+        self.mail_preview_panel.clear()
+        self._selected_mail_id = None
+
+
+    def _on_search_mail(self, event=None):
+        """Öffnet das Suchfenster (nicht-modal)."""
+        dlg = SearchDialog(
+            self, self.controller,
+            on_open_mail=self._on_open_mail_from_search
+        )
+        dlg.Show()
+
+    def _on_open_mail_from_search(self, mail_id: int, folder_id: int):
+        """Callback aus SearchDialog: Mail im Viewer öffnen."""
+        mail = self.controller.db.get_mail(mail_id, folder_id)
+        if mail:
+            from ui.mail_viewer import MailViewerFrame
+            viewer = MailViewerFrame(self, dict(mail), controller=self.controller)
+            viewer.Show()
 
     def _restore_last_folder(self):
         """Stellt den zuletzt ausgewählten Ordner beim Programmstart wieder her."""

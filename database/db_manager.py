@@ -107,8 +107,8 @@ class DatabaseManager:
         self._create_accounts_schema()
         self._create_structure_schema()
         self._migrate_existing_schema()   # Spalten nachrüsten falls DB älter
-        self._seed_demo_data()
-        self._seed_html_demo_mails()      # HTML-Mails separat (idempotent)
+        # Demo-Daten werden NICHT mehr automatisch angelegt.
+        # Ersteinrichtung erfolgt über SetupDialog beim ersten Start.
 
     def _migrate_existing_schema(self):
         """Ergänzt fehlende Spalten in bestehenden Datenbanken (Vorwärts-Migration)."""
@@ -1320,6 +1320,25 @@ class DatabaseManager:
     #  Konto-API                                                          #
     # ------------------------------------------------------------------ #
 
+
+    def create_local_account(self, name: str, email: str) -> int:
+        """Legt ein lokales Konto mit den 6 Standard-IMAP-Ordnern an."""
+        data = {
+            "id": None,
+            "name": name, "email": email, "protocol": "LOCAL",
+            "in_host": "", "in_port": 0, "in_ssl": 0,
+            "out_host": "", "out_port": 0, "out_ssl": 0,
+            "username": email, "password": "",
+        }
+        return self.save_account(data)
+
+    def has_accounts(self) -> bool:
+        """Gibt True zurück wenn mindestens ein Konto vorhanden ist."""
+        row = self._get_accounts_conn().execute(
+            "SELECT COUNT(*) FROM accounts"
+        ).fetchone()
+        return (row[0] if row else 0) > 0
+
     def get_accounts(self) -> list:
         return list(self._get_accounts_conn().execute(
             "SELECT * FROM accounts ORDER BY id").fetchall())
@@ -1428,6 +1447,140 @@ class DatabaseManager:
             "INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES (?,?,datetime('now'))",
             (key, value))
         self._get_accounts_conn().commit()
+
+    def is_first_run(self) -> bool:
+        """True wenn noch keine Konten vorhanden sind (Ersteinrichtung)."""
+        conn = self._get_accounts_conn()
+        count = conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+        return count == 0
+
+    # ------------------------------------------------------------------ #
+    #  Mail-Suche                                                         #
+    # ------------------------------------------------------------------ #
+
+    def search_mails(self, query: str, field: str = "all",
+                     folder_id: int = None,
+                     date_from: str = None, date_to: str = None) -> list:
+        """
+        Durchsucht Mails nach dem Suchbegriff.
+
+        field: "all" | "subject" | "sender" | "recipient" | "body" | "date"
+        folder_id: None = alle Ordner, sonst nur dieser Ordner
+        date_from / date_to: "YYYY-MM-DD" Strings (optional, nur bei field="date")
+        """
+        mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
+
+        if mode == STORAGE_FILES:
+            return self._search_mails_files(query, field, folder_id, date_from, date_to)
+
+        if mode == STORAGE_SQLITE_PER_ACCOUNT:
+            results = []
+            if folder_id:
+                conn = self._mail_conn_for_folder(folder_id)
+                results = self._search_mails_sql(conn, query, field, folder_id, date_from, date_to)
+            else:
+                for acc in self.get_accounts():
+                    conn = self._get_account_mail_conn(acc["id"])
+                    results += self._search_mails_sql(conn, query, field, None, date_from, date_to)
+            return results
+
+        # STORAGE_SQLITE_ONE
+        conn = self._get_structure_conn()
+        return self._search_mails_sql(conn, query, field, folder_id, date_from, date_to)
+
+    def _search_mails_sql(self, conn, query: str, field: str,
+                          folder_id: int, date_from: str, date_to: str) -> list:
+        q   = f"%{query}%"
+        conds = []
+        params: list = []
+
+        if field == "subject":
+            conds.append("subject LIKE ?"); params.append(q)
+        elif field == "sender":
+            conds.append("(sender LIKE ? OR sender_name LIKE ?)"); params += [q, q]
+        elif field == "recipient":
+            conds.append("(recipients LIKE ? OR cc LIKE ?)"); params += [q, q]
+        elif field == "body":
+            conds.append("(body_text LIKE ? OR body_html LIKE ?)"); params += [q, q]
+        elif field == "date":
+            if date_from: conds.append("date >= ?"); params.append(date_from)
+            if date_to:   conds.append("date <= ?"); params.append(date_to + " 23:59:59")
+        else:  # "all"
+            conds.append(
+                "(subject LIKE ? OR sender LIKE ? OR sender_name LIKE ? "
+                "OR recipients LIKE ? OR body_text LIKE ?)")
+            params += [q, q, q, q, q]
+
+        if folder_id:
+            conds.append("folder_id = ?"); params.append(folder_id)
+
+        where = ("WHERE " + " AND ".join(conds)) if conds else ""
+        return list(conn.execute(
+            f"SELECT * FROM mails {where} ORDER BY date DESC LIMIT 500",
+            params
+        ).fetchall())
+
+    def _search_mails_files(self, query: str, field: str,
+                            folder_id: int, date_from: str, date_to: str) -> list:
+        results = []
+        store   = os.path.join(self.data_dir, "mailstore")
+        if not os.path.isdir(store):
+            return []
+        q = query.lower()
+        for root, _, files in os.walk(store):
+            for fn in files:
+                if not fn.endswith(".json"): continue
+                try:
+                    with open(os.path.join(root, fn), encoding="utf-8") as f:
+                        m = json.load(f)
+                    if folder_id and m.get("folder_id") != folder_id:
+                        continue
+                    # Datum-Filter
+                    if date_from or date_to:
+                        d = str(m.get("date", ""))[:10]
+                        if date_from and d < date_from: continue
+                        if date_to   and d > date_to:   continue
+                    # Feld-Filter
+                    hit = False
+                    if field == "subject":
+                        hit = q in str(m.get("subject","")).lower()
+                    elif field == "sender":
+                        hit = q in str(m.get("sender","")).lower() or \
+                              q in str(m.get("sender_name","")).lower()
+                    elif field == "recipient":
+                        hit = q in str(m.get("recipients","")).lower()
+                    elif field == "body":
+                        hit = q in str(m.get("body_text","")).lower()
+                    elif field == "date":
+                        hit = True  # Datum-Filter oben bereits angewendet
+                    else:  # all
+                        hit = any(q in str(m.get(k,"")).lower()
+                                  for k in ("subject","sender","sender_name","recipients","body_text"))
+                    if hit:
+                        results.append(_DictRow(m))
+                except Exception:
+                    pass
+        results.sort(key=lambda m: str(m.get("date") or ""), reverse=True)
+        return results[:500]
+
+    # ------------------------------------------------------------------ #
+    #  Mail kopieren                                                      #
+    # ------------------------------------------------------------------ #
+
+    def copy_mail(self, mail_id: int, target_folder_id: int,
+                  source_folder_id: int = None) -> int:
+        """
+        Kopiert eine Mail in einen anderen Ordner.
+        Gibt die ID der neuen Mail zurück.
+        """
+        mail = self.get_mail(mail_id, source_folder_id)
+        if not mail:
+            return -1
+        data = dict(mail)
+        data.pop("id", None)
+        data.pop("created_at", None)
+        data["folder_id"] = target_folder_id
+        return self.insert_mail(target_folder_id, data)
 
 
 class _DictRow(dict):

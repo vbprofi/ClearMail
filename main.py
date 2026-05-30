@@ -46,9 +46,51 @@ class MailClientApp(wx.App):
         )
         self.frame.Show()
         self.SetTopWindow(self.frame)
-        # Letzten ausgewählten Ordner wiederherstellen
-        wx.CallAfter(self.frame._restore_last_folder)
+        # Letzten ausgewählten Ordner wiederherstellen / Ersteinrichtung
+        wx.CallAfter(self._post_start)
         return True
+
+    def _post_start(self):
+        """Wird nach dem ersten Paint aufgerufen."""
+        if self.controller.is_first_run():
+            from ui.dialogs import SetupDialog, AccountDialog
+            dlg = SetupDialog(self.frame, self.controller)
+            result = dlg.ShowModal()
+            dlg.Destroy()
+
+            if result == wx.ID_OK:
+                # Nutzer möchte Konto anlegen
+                acc_dlg = AccountDialog(self.frame, self.controller)
+                acc_dlg.ShowModal()
+                acc_dlg.Destroy()
+
+            # Nach Setup (egal ob Konto angelegt oder übersprungen):
+            # Falls immer noch kein Konto → Standard-Lokalkonto anlegen
+            if self.controller.is_first_run():
+                self._create_default_local_account()
+
+            self.frame.folder_panel.reload()
+        else:
+            self.frame._restore_last_folder()
+
+    def _create_default_local_account(self):
+        """Legt ein Standard-Lokalkonto an wenn der Nutzer keins erstellt hat."""
+        import getpass
+        username = getpass.getuser()
+        self.controller.save_account({
+            "id":       None,
+            "name":     username,
+            "email":    f"{username}@lokal",
+            "protocol": "IMAP",
+            "in_host":  "localhost",
+            "in_port":  993,
+            "in_ssl":   0,
+            "out_host": "localhost",
+            "out_port": 587,
+            "out_ssl":  0,
+            "username": username,
+            "password": "",
+        })
 
     def OnExit(self):
         self.db_manager.close()
