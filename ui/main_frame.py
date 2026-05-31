@@ -478,9 +478,11 @@ class MainFrame(wx.Frame):
 
     def _on_flag(self, event):
         if not self._selected_mail_id: return
-        mail = self.controller.get_mail(self._selected_mail_id)
+        fid  = self._selected_folder_id
+        mail = self.controller.get_mail(self._selected_mail_id, fid)
         if mail:
-            self.controller.mark_mail_flagged(self._selected_mail_id, not bool(mail["is_flagged"]))
+            new_flagged = not bool(mail["is_flagged"])
+            self.controller.mark_mail_flagged(self._selected_mail_id, new_flagged, folder_id=fid)
             self.mail_list_panel.reload_current_folder()
 
     def _on_copy_mail(self, event=None):
@@ -535,15 +537,16 @@ class MainFrame(wx.Frame):
         self.mail_list_panel._sort_col = col_map.get(sort_key, COL_DATE)
         self.mail_list_panel._sort_asc = self.mi_sort_asc.IsChecked()
         self.mail_list_panel._apply_sort_to_data()
-        self.mail_list_panel._rebuild_from_sorted_data()
+        self.mail_list_panel._render_list()
+        self.mail_list_panel._update_sort_header()
         self._save_sort_settings(sort_key, self.mi_sort_asc.IsChecked())
 
     def _on_sort_direction(self):
         """Richtungswechsel ohne Feldwechsel."""
         self.mail_list_panel._sort_asc = self.mi_sort_asc.IsChecked()
         self.mail_list_panel._apply_sort_to_data()
-        self.mail_list_panel._rebuild_from_sorted_data()
-        # Aktives Feld ermitteln
+        self.mail_list_panel._render_list()
+        self.mail_list_panel._update_sort_header()
         for key, mi in self._sort_items.items():
             if mi.IsChecked():
                 self._save_sort_settings(key, self.mi_sort_asc.IsChecked())
@@ -737,9 +740,12 @@ class MainFrame(wx.Frame):
             self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
             self.folder_panel.reload()
             if self._selected_folder_id:
+                saved_mail_id = self._selected_mail_id
                 mails = self.controller.get_mails(self._selected_folder_id)
                 self.mail_list_panel.load_mails(mails)
                 self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+                if saved_mail_id:
+                    wx.CallAfter(self.mail_list_panel.select_mail_by_id, saved_mail_id)
             if not self._selected_folder_id:
                 self._restore_last_folder()
 
@@ -1001,17 +1007,10 @@ class MainFrame(wx.Frame):
         parent_menu.AppendSubMenu(sub, label)
 
     def _copy_mail(self, mail_id: int, target_folder_id: int, source_folder_id: int):
-        """Kopiert eine Mail in einen anderen Ordner (Duplikat anlegen)."""
+        """Kopiert eine Mail in einen anderen Ordner – inkl. IMAP-Server-Sync."""
         if not mail_id or target_folder_id == source_folder_id:
             return
-        mail = self.controller.db.get_mail(mail_id, source_folder_id)
-        if not mail:
-            return
-        d = dict(mail)
-        d.pop("id", None)
-        d["folder_id"] = target_folder_id
-        self.controller.db.insert_mail(target_folder_id, d)
-        self.controller.db.update_folder_unread(target_folder_id)
+        self.controller.copy_mail(mail_id, target_folder_id, source_folder_id)
         self.folder_panel.refresh_folder_unread(target_folder_id)
 
     def _move_mail(self, mail_id: int, target_folder_id: int, source_folder_id: int):
@@ -1080,13 +1079,24 @@ class MainFrame(wx.Frame):
             self._auto_fetch.stop_all()
 
     def _on_auto_fetch_done(self, count: int):
-        """Wird nach erfolgreichem Auto-Fetch im Haupt-Thread aufgerufen."""
+        """
+        Wird nach erfolgreichem Auto-Fetch im Haupt-Thread aufgerufen.
+
+        FIX: Speichert den aktuell fokussierten Mail-Index VOR dem Neuladen
+        und stellt ihn NACH dem Neuladen wieder her, damit der Fokus nicht
+        verloren geht wenn neue Mails eintreffen.
+        """
         self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
         self.folder_panel.reload()
         if self._selected_folder_id:
+            # Fokus sichern
+            saved_mail_id = self._selected_mail_id
             mails = self.controller.get_mails(self._selected_folder_id)
             self.mail_list_panel.load_mails(mails)
             self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+            # Fokus wiederherstellen
+            if saved_mail_id:
+                wx.CallAfter(self.mail_list_panel.select_mail_by_id, saved_mail_id)
 
     def _restore_last_mail(self, folder_id: int):
         """Wählt die zuletzt fokussierte Mail im Ordner wieder aus."""

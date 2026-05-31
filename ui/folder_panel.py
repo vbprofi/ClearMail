@@ -256,6 +256,14 @@ class FolderPanel(wx.Panel):
             (mb["id"], name)
         )
         conn.commit()
+        folder_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # IMAP-Server synchronisieren
+        import threading
+        threading.Thread(
+            target=self.controller.imap_create_folder,
+            args=(folder_id, None),
+            daemon=True
+        ).start()
         self.reload()
 
     def _on_new_subfolder(self, parent_item):
@@ -273,6 +281,13 @@ class FolderPanel(wx.Panel):
             (f["mailbox_id"], f["id"], name)
         )
         conn.commit()
+        folder_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        import threading
+        threading.Thread(
+            target=self.controller.imap_create_folder,
+            args=(folder_id, f["id"]),
+            daemon=True
+        ).start()
         self.reload()
 
     def _on_rename_folder(self, item):
@@ -290,6 +305,13 @@ class FolderPanel(wx.Panel):
         conn.commit()
         self.tree.SetItemText(item, new_name)
         self._folder_map[item]["name"] = new_name
+        # IMAP-Server synchronisieren
+        import threading
+        threading.Thread(
+            target=self.controller.imap_rename_folder,
+            args=(f["id"], new_name),
+            daemon=True
+        ).start()
 
     def _on_delete_folder(self, item):
         f = self._folder_map.get(item)
@@ -305,7 +327,16 @@ class FolderPanel(wx.Panel):
                              wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
                 return
 
-        self.controller.delete_folder(f["id"], f["mailbox_id"], use_trash=use_trash)
+        folder_id = f["id"]
+        self.controller.delete_folder(folder_id, f["mailbox_id"], use_trash=use_trash)
+        # IMAP-Server synchronisieren (nur wenn wirklich gelöscht, nicht in Papierkorb)
+        if not use_trash:
+            import threading
+            threading.Thread(
+                target=self.controller.imap_delete_folder,
+                args=(folder_id,),
+                daemon=True
+            ).start()
         del self._folder_map[item]
         self.tree.Delete(item)
 

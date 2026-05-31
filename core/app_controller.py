@@ -58,21 +58,56 @@ class AppController:
                 self.db.update_folder_unread(folder_id)
                 self.db.update_folder_unread(trash_id)
                 self.addon_mgr.fire("mail_moved", {"mail_id": mail_id, "folder_id": trash_id})
+                # IMAP: auf Server in Papierkorb verschieben
+                import threading
+                threading.Thread(
+                    target=self.imap_delete_mail,
+                    args=(mail_id, folder_id, trash_id),
+                    daemon=True
+                ).start()
                 return "moved_to_trash"
         self.db.delete_mail(mail_id, folder_id)
         self.db.update_folder_unread(folder_id)
         self.addon_mgr.fire("mail_deleted", {"mail_id": mail_id})
+        # IMAP: endgültig löschen
+        import threading
+        threading.Thread(
+            target=self.imap_delete_mail,
+            args=(mail_id, folder_id, None),
+            daemon=True
+        ).start()
         return "deleted"
 
     def move_mail(self, mail_id: int, target_folder_id: int, source_folder_id: int = None):
         self.db.move_mail(mail_id, target_folder_id, source_folder_id)
         self.addon_mgr.fire("mail_moved", {"mail_id": mail_id, "folder_id": target_folder_id})
+        if source_folder_id:
+            import threading
+            threading.Thread(
+                target=self.imap_move_mail,
+                args=(mail_id, source_folder_id, target_folder_id),
+                daemon=True
+            ).start()
 
     def mark_mail_flagged(self, mail_id: int, flagged: bool, folder_id: int = None):
         self.db.mark_mail_flagged(mail_id, flagged, folder_id=folder_id)
+        if folder_id:
+            import threading
+            threading.Thread(
+                target=self.imap_mark_flagged,
+                args=(mail_id, flagged, folder_id),
+                daemon=True
+            ).start()
 
     def mark_mail_read(self, mail_id: int, is_read: bool, folder_id: int = None):
         self.db.mark_mail_read(mail_id, is_read, folder_id=folder_id)
+        if folder_id:
+            import threading
+            threading.Thread(
+                target=self.imap_mark_read,
+                args=(mail_id, is_read, folder_id),
+                daemon=True
+            ).start()
 
     def delete_folder(self, folder_id: int, mailbox_id: int, use_trash: bool = None) -> str:
         if use_trash is None:
@@ -236,6 +271,13 @@ class AppController:
                   source_folder_id: int = None) -> int:
         result = self.db.copy_mail(mail_id, target_folder_id, source_folder_id)
         self.db.update_folder_unread(target_folder_id)
+        if source_folder_id:
+            import threading
+            threading.Thread(
+                target=self.imap_copy_mail,
+                args=(mail_id, source_folder_id, target_folder_id),
+                daemon=True
+            ).start()
         return result
 
     # ------------------------------------------------------------------ #
@@ -683,3 +725,289 @@ class AppController:
             "size":         len(tr("welcome_body")),
         })
         self.db.update_folder_unread(inbox_folder_id)
+
+    # ================================================================== #
+    #  IMAP-Server-Sync für GUI-Operationen                              #
+    # ================================================================== #
+
+    def _get_imap_conn_for_folder(self, folder_id: int):
+        """
+        Gibt (IMAPHandler-Instanz, imap_path, account_dict) für einen Ordner zurück.
+        Gibt (None, None, None) zurück wenn das Konto kein IMAP-Konto ist oder
+        kein imap_path gesetzt ist (z.B. lokale Ordner).
+        Caller muss imap.__enter__() / imap.__exit__() selbst aufrufen.
+        """
+        from protocols.imap_handler import IMAPHandler
+        sc  = self.db._get_structure_conn()
+        row = sc.execute(
+            "SELECT f.imap_path, mb.account_id "
+            "FROM folders f JOIN mailboxes mb ON f.mailbox_id=mb.id "
+            "WHERE f.id=?", (folder_id,)
+        ).fetchone()
+        if not row or not row[0]:
+            return None, None, None
+        imap_path  = row[0]
+        account_id = row[1]
+        acc = self.db.get_account(account_id)
+        if not acc:
+            return None, None, None
+        acc = dict(acc)
+        if acc.get("protocol", "LOCAL").upper() not in ("IMAP",):
+            return None, None, None
+        imap = IMAPHandler(
+            host=acc["in_host"], port=int(acc.get("in_port") or 993),
+            username=acc.get("username") or acc.get("email", ""),
+            password=acc.get("password") or "",
+            use_ssl=bool(acc.get("in_ssl", 1)),
+        )
+        return imap, imap_path, acc
+
+    def _get_uid_for_mail(self, mail_id: int, folder_id: int) -> str | None:
+        """Gibt die IMAP-UID einer lokalen Mail zurück."""
+        mail = self.db.get_mail(mail_id, folder_id)
+        if not mail:
+            return None
+        return str(dict(mail).get("uid") or "") or None
+
+    # ---- Mail-Flags auf Server synchronisieren -----------------------
+
+    def imap_mark_read(self, mail_id: int, is_read: bool, folder_id: int):
+        """Setzt/entfernt \\Seen auf dem IMAP-Server. Fehler werden still ignoriert."""
+        from core.protocol_runner import log
+        uid = self._get_uid_for_mail(mail_id, folder_id)
+        if not uid:
+            return
+        imap, imap_path, _ = self._get_imap_conn_for_folder(folder_id)
+        if not imap:
+            return
+        try:
+            with imap:
+                if is_read:
+                    imap.mark_read(uid, imap_path)
+                else:
+                    imap.mark_unread(uid, imap_path)
+        except Exception as e:
+            log("warning", f"IMAP mark_read sync failed uid={uid}: {e}")
+
+    def imap_mark_flagged(self, mail_id: int, flagged: bool, folder_id: int):
+        """Setzt/entfernt \\Flagged auf dem IMAP-Server."""
+        from core.protocol_runner import log
+        uid = self._get_uid_for_mail(mail_id, folder_id)
+        if not uid:
+            return
+        imap, imap_path, _ = self._get_imap_conn_for_folder(folder_id)
+        if not imap:
+            return
+        try:
+            with imap:
+                if flagged:
+                    imap.mark_flagged(uid, imap_path)
+                else:
+                    imap.select_folder(imap_path)
+                    imap._conn.uid("store", uid, "-FLAGS", "\\Flagged")
+        except Exception as e:
+            log("warning", f"IMAP mark_flagged sync failed uid={uid}: {e}")
+
+    def imap_delete_mail(self, mail_id: int, folder_id: int, trash_folder_id: int = None):
+        """
+        Löscht/verschiebt eine Mail auf dem IMAP-Server.
+        - trash_folder_id gesetzt → MOVE in Papierkorb (RFC 6851 MOVE oder COPY+DELETE)
+        - sonst → endgültig löschen (\\Deleted + EXPUNGE)
+        """
+        from core.protocol_runner import log
+        uid = self._get_uid_for_mail(mail_id, folder_id)
+        if not uid:
+            return
+        imap, imap_path, _ = self._get_imap_conn_for_folder(folder_id)
+        if not imap:
+            return
+        try:
+            with imap:
+                if trash_folder_id:
+                    sc        = self.db._get_structure_conn()
+                    trash_row = sc.execute(
+                        "SELECT imap_path FROM folders WHERE id=?", (trash_folder_id,)
+                    ).fetchone()
+                    trash_path = trash_row[0] if trash_row and trash_row[0] else None
+                    if trash_path:
+                        imap.move_mail(uid, imap_path, trash_path)
+                        return
+                # Endgültig löschen
+                imap.delete_mail(uid, imap_path)
+        except Exception as e:
+            log("warning", f"IMAP delete sync failed uid={uid}: {e}")
+
+    def imap_move_mail(self, mail_id: int, from_folder_id: int, to_folder_id: int):
+        """Verschiebt eine Mail auf dem IMAP-Server."""
+        from core.protocol_runner import log
+        uid = self._get_uid_for_mail(mail_id, from_folder_id)
+        if not uid:
+            return
+        imap, from_path, _ = self._get_imap_conn_for_folder(from_folder_id)
+        if not imap:
+            return
+        sc       = self.db._get_structure_conn()
+        to_row   = sc.execute("SELECT imap_path FROM folders WHERE id=?", (to_folder_id,)).fetchone()
+        to_path  = to_row[0] if to_row and to_row[0] else None
+        if not to_path:
+            return
+        try:
+            with imap:
+                imap.move_mail(uid, from_path, to_path)
+        except Exception as e:
+            log("warning", f"IMAP move sync failed uid={uid}: {e}")
+
+    def imap_copy_mail(self, mail_id: int, from_folder_id: int, to_folder_id: int):
+        """Kopiert eine Mail auf dem IMAP-Server (COPY-Befehl, RFC 3501 §6.4.7)."""
+        from core.protocol_runner import log
+        uid = self._get_uid_for_mail(mail_id, from_folder_id)
+        if not uid:
+            return
+        imap, from_path, _ = self._get_imap_conn_for_folder(from_folder_id)
+        if not imap:
+            return
+        sc      = self.db._get_structure_conn()
+        to_row  = sc.execute("SELECT imap_path FROM folders WHERE id=?", (to_folder_id,)).fetchone()
+        to_path = to_row[0] if to_row and to_row[0] else None
+        if not to_path:
+            return
+        try:
+            with imap:
+                imap.select_folder(from_path)
+                imap._conn.uid("copy", uid, f'"{to_path}"')
+        except Exception as e:
+            log("warning", f"IMAP copy sync failed uid={uid}: {e}")
+
+    # ---- Ordner-Operationen auf Server synchronisieren ---------------
+
+    def imap_create_folder(self, folder_id: int, parent_folder_id: int = None):
+        """Legt einen neuen Ordner auf dem IMAP-Server an und setzt imap_path."""
+        from core.protocol_runner import log
+        sc      = self.db._get_structure_conn()
+        f_row   = sc.execute("SELECT name, mailbox_id FROM folders WHERE id=?", (folder_id,)).fetchone()
+        if not f_row:
+            return
+        name, mailbox_id = f_row[0], f_row[1]
+
+        # Konto ermitteln
+        mb_row = sc.execute("SELECT account_id FROM mailboxes WHERE id=?", (mailbox_id,)).fetchone()
+        if not mb_row:
+            return
+        acc = self.db.get_account(mb_row[0])
+        if not acc:
+            return
+        acc = dict(acc)
+        if acc.get("protocol", "LOCAL").upper() != "IMAP":
+            return
+
+        from protocols.imap_handler import IMAPHandler
+        imap = IMAPHandler(
+            host=acc["in_host"], port=int(acc.get("in_port") or 993),
+            username=acc.get("username") or acc.get("email", ""),
+            password=acc.get("password") or "",
+            use_ssl=bool(acc.get("in_ssl", 1)),
+        )
+        try:
+            with imap:
+                sep = imap._separator
+                if parent_folder_id:
+                    p_row = sc.execute(
+                        "SELECT imap_path FROM folders WHERE id=?", (parent_folder_id,)
+                    ).fetchone()
+                    parent_path = p_row[0] if p_row and p_row[0] else ""
+                else:
+                    parent_path = ""
+                new_path = f"{parent_path}{sep}{name}" if parent_path else name
+                ok = imap.create_folder(new_path)
+                if ok:
+                    sc.execute("UPDATE folders SET imap_path=? WHERE id=?", (new_path, folder_id))
+                    sc.commit()
+                    log("info", f"IMAP CREATE folder {new_path!r} OK")
+                else:
+                    log("warning", f"IMAP CREATE folder {new_path!r} failed")
+        except Exception as e:
+            log("warning", f"IMAP create_folder failed: {e}")
+
+    def imap_rename_folder(self, folder_id: int, new_name: str):
+        """Benennt einen Ordner auf dem IMAP-Server um (RENAME-Befehl)."""
+        from core.protocol_runner import log
+        sc    = self.db._get_structure_conn()
+        f_row = sc.execute("SELECT imap_path, mailbox_id FROM folders WHERE id=?", (folder_id,)).fetchone()
+        if not f_row or not f_row[0]:
+            return
+        old_path, mailbox_id = f_row[0], f_row[1]
+
+        mb_row = sc.execute("SELECT account_id FROM mailboxes WHERE id=?", (mailbox_id,)).fetchone()
+        if not mb_row:
+            return
+        acc = self.db.get_account(mb_row[0])
+        if not acc:
+            return
+        acc = dict(acc)
+        if acc.get("protocol", "LOCAL").upper() != "IMAP":
+            return
+
+        from protocols.imap_handler import IMAPHandler
+        imap = IMAPHandler(
+            host=acc["in_host"], port=int(acc.get("in_port") or 993),
+            username=acc.get("username") or acc.get("email", ""),
+            password=acc.get("password") or "",
+            use_ssl=bool(acc.get("in_ssl", 1)),
+        )
+        try:
+            with imap:
+                sep      = imap._separator
+                parts    = old_path.split(sep)
+                parts[-1] = new_name
+                new_path = sep.join(parts)
+                typ, _   = imap._conn.rename(f'"{old_path}"', f'"{new_path}"')
+                if typ == "OK":
+                    sc.execute(
+                        "UPDATE folders SET imap_path=? WHERE id=?", (new_path, folder_id)
+                    )
+                    # Unterordner: Pfade anpassen
+                    for child in sc.execute(
+                        "SELECT id, imap_path FROM folders WHERE imap_path LIKE ?",
+                        (old_path + sep + "%",)
+                    ).fetchall():
+                        child_new = new_path + child[1][len(old_path):]
+                        sc.execute("UPDATE folders SET imap_path=? WHERE id=?", (child_new, child[0]))
+                    sc.commit()
+                    log("info", f"IMAP RENAME {old_path!r} → {new_path!r} OK")
+                else:
+                    log("warning", f"IMAP RENAME {old_path!r} failed")
+        except Exception as e:
+            log("warning", f"IMAP rename_folder failed: {e}")
+
+    def imap_delete_folder(self, folder_id: int):
+        """Löscht einen Ordner auf dem IMAP-Server."""
+        from core.protocol_runner import log
+        sc    = self.db._get_structure_conn()
+        f_row = sc.execute("SELECT imap_path, mailbox_id FROM folders WHERE id=?", (folder_id,)).fetchone()
+        if not f_row or not f_row[0]:
+            return
+        imap_path, mailbox_id = f_row[0], f_row[1]
+
+        mb_row = sc.execute("SELECT account_id FROM mailboxes WHERE id=?", (mailbox_id,)).fetchone()
+        if not mb_row:
+            return
+        acc = self.db.get_account(mb_row[0])
+        if not acc:
+            return
+        acc = dict(acc)
+        if acc.get("protocol", "LOCAL").upper() != "IMAP":
+            return
+
+        from protocols.imap_handler import IMAPHandler
+        imap = IMAPHandler(
+            host=acc["in_host"], port=int(acc.get("in_port") or 993),
+            username=acc.get("username") or acc.get("email", ""),
+            password=acc.get("password") or "",
+            use_ssl=bool(acc.get("in_ssl", 1)),
+        )
+        try:
+            with imap:
+                imap.delete_folder(imap_path)
+                log("info", f"IMAP DELETE folder {imap_path!r} OK")
+        except Exception as e:
+            log("warning", f"IMAP delete_folder failed: {e}")
