@@ -380,5 +380,9 @@
   "search_account_filter": "Konto:",
   "search_account_all": "Alle Konten",
   "storage_mbox": "Mbox-Dateien",
-  "settings_storage_mbox": "Mbox-Format (.mbox)"
+  "settings_storage_mbox": "Mbox-Format (.mbox)",
+  "addon_btn_settings": "Einstellungen…",
+  "addon_settings_title": "Einstellungen: {name}",
+  "addon_no_settings": "Das Addon '{name}' hat keine eigenen Einstellungen.",
+  "addon_not_active": "Addon '{name}' ist nicht aktiv. Bitte zuerst aktivieren."
 }

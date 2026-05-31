@@ -36,6 +36,15 @@ class AddonBase:
     def on_pgp_decrypt(self, d: dict) -> dict:                              return d
     def on_pgp_encrypt(self, d: dict) -> dict:                              return d
 
+    def get_settings_panel(self, parent) -> "wx.Panel | None":
+        """
+        Optionaler Einstellungs-Panel für dieses Addon.
+        Gibt einen wx.Panel zurück der im Addon-Einstellungsdialog angezeigt wird,
+        oder None wenn das Addon keine eigenen Einstellungen hat.
+        Der Panel muss eine Methode save() implementieren die die Einstellungen speichert.
+        """
+        return None
+
 
 class AddonManager:
 
@@ -100,6 +109,13 @@ class AddonManager:
         if name in self._addons:
             self.unload_addon(name)
 
+        # FIX: Sprachdateien ZUERST laden, dann on_load() aufrufen –
+        # sonst gibt tr() in on_load() noch die unübersetzten Keys zurück.
+        addon_dir = self._find_addon_dir(name)
+        if addon_dir:
+            from core.i18n import load_addon_translations
+            load_addon_translations(addon_dir, lang)
+
         try:
             instance = cls(controller)
             instance.on_load()
@@ -110,12 +126,6 @@ class AddonManager:
         self._addons[name]      = instance
         self._addon_paths[name] = addon_path
         self._register_hooks(instance)
-
-        # Addon-Sprachdateien laden
-        addon_dir = self._find_addon_dir(name)
-        if addon_dir:
-            from core.i18n import load_addon_translations
-            load_addon_translations(addon_dir, lang)
 
         return True
 

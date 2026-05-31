@@ -704,6 +704,9 @@ class Addon(AddonBase):
         self._win.Show()
         self._win.Raise()
 
+    def get_settings_panel(self, parent) -> wx.Panel:
+        return AddressBookSettingsPanel(parent, self.controller, self._db)
+
     def get_menu_items(self) -> list:
         return [{
             "label":   tr("ab_menu_open"),
@@ -714,3 +717,111 @@ class Addon(AddonBase):
         app   = wx.GetApp()
         frame = app.GetTopWindow() if app else None
         self.open_window(frame)
+
+
+# ------------------------------------------------------------------ #
+#  Addon-Einstellungs-Panel für das Adressbuch                       #
+# ------------------------------------------------------------------ #
+
+class AddressBookSettingsPanel(wx.Panel):
+    """
+    Einstellungen für das Adressbuch-Addon:
+      - Angezeigte Felder konfigurieren (Reihenfolge + Sichtbarkeit)
+      - Beispieldaten beim ersten Start: ja/nein
+      - Datenbank-Pfad anzeigen
+    """
+
+    # Alle verfügbaren Felder mit Anzeigename und DB-Spaltenname
+    ALL_FIELDS = [
+        ("firstname",  "ab_field_firstname"),
+        ("lastname",   "ab_field_lastname"),
+        ("email",      "ab_field_email"),
+        ("email2",     "ab_field_email2"),
+        ("phone",      "ab_field_phone"),
+        ("mobile",     "ab_field_mobile"),
+        ("org",        "ab_field_org"),
+        ("title",      "ab_field_title"),
+        ("address",    "ab_field_address"),
+        ("notes",      "ab_field_notes"),
+    ]
+
+    def __init__(self, parent, controller, db):
+        super().__init__(parent)
+        self._ctrl = controller
+        self._db   = db
+        self._build()
+        self._load()
+
+    def _build(self):
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # ---- Sichtbare Felder ----
+        lbl = wx.StaticText(self, label=tr("ab_settings_fields_label"))
+        lbl.SetFont(lbl.GetFont().Bold())
+        sizer.Add(lbl, 0, wx.ALL, 8)
+
+        hint = wx.StaticText(self, label=tr("ab_settings_fields_hint"))
+        hint.SetForegroundColour(wx.Colour(100, 100, 100))
+        sizer.Add(hint, 0, wx.LEFT | wx.BOTTOM, 8)
+
+        self._chk_fields = {}
+        field_grid = wx.GridSizer(cols=2, vgap=4, hgap=12)
+        for col, key in self.ALL_FIELDS:
+            chk = wx.CheckBox(self, label=tr(key))
+            chk.SetName(col)
+            self._chk_fields[col] = chk
+            field_grid.Add(chk, 0)
+        sizer.Add(field_grid, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        # ---- Beispieldaten ----
+        self.chk_sample = wx.CheckBox(self, label=tr("ab_settings_sample_data"))
+        self.chk_sample.SetName(tr("ab_settings_sample_data"))
+        sizer.Add(self.chk_sample, 0, wx.ALL, 8)
+
+        lbl_sample_hint = wx.StaticText(self, label=tr("ab_settings_sample_hint"))
+        lbl_sample_hint.SetForegroundColour(wx.Colour(100, 100, 100))
+        sizer.Add(lbl_sample_hint, 0, wx.LEFT | wx.BOTTOM, 8)
+
+        # ---- Datenbankpfad ----
+        sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        db_path = self._db._path if self._db else "?"
+        lbl_db = wx.StaticText(self, label=tr("ab_settings_db_path", path=db_path))
+        lbl_db.SetForegroundColour(wx.Colour(100, 100, 100))
+        sizer.Add(lbl_db, 0, wx.ALL, 8)
+
+        self.SetSizer(sizer)
+
+    def _load(self):
+        # Sichtbare Felder laden (Standard: alle sichtbar)
+        visible_raw = self._ctrl.get_setting("ab_visible_fields", "")
+        if visible_raw:
+            visible = set(visible_raw.split(","))
+        else:
+            visible = {col for col, _ in self.ALL_FIELDS}
+        for col, chk in self._chk_fields.items():
+            chk.SetValue(col in visible)
+        # Beispieldaten
+        self.chk_sample.SetValue(
+            self._ctrl.get_setting("ab_sample_data", "1") == "1")
+
+    def save(self):
+        visible = [col for col, chk in self._chk_fields.items() if chk.GetValue()]
+        if not visible:
+            import wx as _wx
+            _wx.MessageBox(tr("ab_settings_fields_required"),
+                           tr("error_title"), _wx.OK | _wx.ICON_WARNING)
+            raise ValueError("Mindestens ein Feld muss sichtbar sein.")
+        self._ctrl.set_setting("ab_visible_fields", ",".join(visible))
+        old_sample = self._ctrl.get_setting("ab_sample_data", "1")
+        new_sample = "1" if self.chk_sample.GetValue() else "0"
+        self._ctrl.set_setting("ab_sample_data", new_sample)
+        # Wenn Beispieldaten neu aktiviert und DB leer → Beispieldaten einfügen
+        if new_sample == "1" and old_sample == "0":
+            try:
+                cur = self._db.conn().execute("SELECT COUNT(*) FROM contacts")
+                if cur.fetchone()[0] == 0:
+                    self._db.initialize()
+            except Exception:
+                pass

@@ -349,50 +349,75 @@ class MainFrame(wx.Frame):
             self._mark_read_timer = None
 
         self._selected_mail_id = mail_id
-        # Ausgewählte Mail persistent speichern (pro Ordner)
         if self._selected_folder_id:
             self.controller.set_setting(f"last_mail_{self._selected_folder_id}", str(mail_id))
-        # get_mail OHNE automatisches Markieren als gelesen – das steuert der Timer
+
         mail = self.controller.db.get_mail(mail_id, self._selected_folder_id)
-        if mail:
-            self.mail_preview_panel.show_mail(dict(mail))
-            if self._selected_folder_id:
-                self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+        if not mail:
+            return
 
-            delay_s = int(self.controller.get_setting("mark_read_after", "0"))
-            mail_d  = dict(mail)
-            already_read = int(mail_d.get("is_read") or 0)
+        mail_d = dict(mail)
+        self.mail_preview_panel.show_mail(mail_d)
+        if self._selected_folder_id:
+            self.folder_panel.refresh_folder_unread(self._selected_folder_id)
 
-            if already_read:
-                # Bereits gelesen – nichts tun
-                return
+        already_read = int(mail_d.get("is_read") or 0)
+        delay_s      = int(self.controller.get_setting("mark_read_after", "0"))
 
-            if delay_s == 0:
-                # Sofort als gelesen markieren
-                fid = self._selected_folder_id
-                self.controller.mark_mail_read(mail_id, True, folder_id=fid)
-                if fid:
-                    self.controller.db.update_folder_unread(fid)
-                self.mail_list_panel.refresh_mail_read(mail_id, force_read=True)
-                if fid:
-                    self.folder_panel.refresh_folder_unread(fid)
-                self.controller.addon_mgr.fire("mail_read", {"mail_id": mail_id})
-            elif delay_s > 0:
-                # Nach X Sekunden als gelesen markieren
-                self._mark_read_timer = wx.CallLater(
-                    delay_s * 1000, self._auto_mark_read, mail_id
-                )
+        event_data = {
+            "mail_id":     mail_id,
+            "folder_id":   self._selected_folder_id,
+            "subject":     mail_d.get("subject", ""),
+            "sender":      mail_d.get("sender", ""),
+            "sender_name": mail_d.get("sender_name", ""),
+            "date":        mail_d.get("date", ""),
+            "was_read":    bool(already_read),
+        }
+
+        if already_read:
+            # Mail war schon gelesen → nur loggen, kein mark_read nötig
+            self.controller.addon_mgr.fire("mail_read", event_data)
+            return
+
+        if delay_s == 0:
+            fid = self._selected_folder_id
+            self.controller.mark_mail_read(mail_id, True, folder_id=fid)
+            if fid:
+                self.controller.db.update_folder_unread(fid)
+            self.mail_list_panel.refresh_mail_read(mail_id, force_read=True)
+            if fid:
+                self.folder_panel.refresh_folder_unread(fid)
+            self.controller.addon_mgr.fire("mail_read", event_data)
+        elif delay_s > 0:
+            # Nach X Sekunden als gelesen markieren; sofort loggen
+            self.controller.addon_mgr.fire("mail_read", event_data)
+            self._mark_read_timer = wx.CallLater(
+                delay_s * 1000, self._auto_mark_read, mail_id
+            )
 
     def _auto_mark_read(self, mail_id: int):
         """Wird nach Ablauf des Timers aufgerufen – markiert Mail als gelesen."""
         self._mark_read_timer = None
         if self._selected_mail_id != mail_id:
             return  # Nutzer hat inzwischen andere Mail gewählt
-        fid = self._selected_folder_id
+        fid  = self._selected_folder_id
+        mail = self.controller.db.get_mail(mail_id, fid)
         self.controller.mark_mail_read(mail_id, True, folder_id=fid)
         if fid:
             self.controller.db.update_folder_unread(fid)
         self.mail_list_panel.refresh_mail_read(mail_id, force_read=True)
+        if fid:
+            self.folder_panel.refresh_folder_unread(fid)
+        # Addon-Event mit vollständigen Mail-Daten
+        mail_d = dict(mail) if mail else {}
+        self.controller.addon_mgr.fire("mail_read", {
+            "mail_id":     mail_id,
+            "folder_id":   fid,
+            "subject":     mail_d.get("subject", ""),
+            "sender":      mail_d.get("sender", ""),
+            "sender_name": mail_d.get("sender_name", ""),
+            "date":        mail_d.get("date", ""),
+        })
         if fid:
             self.folder_panel.refresh_folder_unread(fid)
 

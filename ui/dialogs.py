@@ -15,6 +15,60 @@ def add_labeled_field(parent, sizer, label_text, ctrl_factory, name=None):
     return ctrl
 
 
+class AddonSettingsDialog(wx.Dialog):
+    """
+    Generischer Einstellungsdialog für Addons.
+    Zeigt den Panel der vom Addon via get_settings_panel() geliefert wird.
+    """
+
+    def __init__(self, parent, addon, addon_name: str):
+        super().__init__(parent,
+                         title=tr("addon_settings_title", name=addon_name),
+                         size=(480, 380),
+                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self._addon       = addon
+        self._addon_name  = addon_name
+        self._settings_panel = None
+        self._build_ui()
+        self.Centre()
+
+    def _build_ui(self):
+        outer = wx.BoxSizer(wx.VERTICAL)
+        panel = wx.Panel(self)
+
+        self._settings_panel = self._addon.get_settings_panel(panel)
+
+        if self._settings_panel is None:
+            lbl = wx.StaticText(panel,
+                                label=tr("addon_no_settings", name=self._addon_name))
+            lbl.SetForegroundColour(wx.Colour(100, 100, 100))
+            outer.Add(lbl, 1, wx.ALL | wx.ALIGN_CENTER, 20)
+        else:
+            outer.Add(self._settings_panel, 1, wx.EXPAND | wx.ALL, 8)
+
+        line = wx.StaticLine(panel)
+        outer.Add(line, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        bs       = wx.StdDialogButtonSizer()
+        btn_ok   = wx.Button(panel, wx.ID_OK,     tr("dlg_save"))
+        btn_cancel = wx.Button(panel, wx.ID_CANCEL, tr("dlg_cancel"))
+        btn_ok.SetDefault()
+        bs.AddButton(btn_ok); bs.AddButton(btn_cancel); bs.Realize()
+        outer.Add(bs, 0, wx.EXPAND | wx.ALL, 8)
+
+        panel.SetSizer(outer)
+        btn_ok.Bind(wx.EVT_BUTTON, self._on_save)
+
+    def _on_save(self, event):
+        if self._settings_panel and hasattr(self._settings_panel, "save"):
+            try:
+                self._settings_panel.save()
+            except Exception as e:
+                wx.MessageBox(str(e), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
+                return
+        self.EndModal(wx.ID_OK)
+
+
 def _restart_app():
     """Startet die Anwendung neu."""
     python = sys.executable
@@ -629,6 +683,9 @@ class AddonManagerDialog(wx.Dialog):
         btn_close.Bind(wx.EVT_BUTTON,       lambda e: self.EndModal(wx.ID_CLOSE))
         for b in (self.btn_toggle, btn_install, btn_open_dir):
             row.Add(b, 0, wx.RIGHT, 6)
+        btn_settings = wx.Button(panel, label=tr("addon_btn_settings"))
+        btn_settings.SetName(tr("addon_btn_settings"))
+        row.Add(btn_settings, 0, wx.RIGHT, 6)
         row.AddStretchSpacer();  row.Add(btn_close)
         sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(wx.StaticText(panel,
@@ -636,6 +693,7 @@ class AddonManagerDialog(wx.Dialog):
             0, wx.LEFT | wx.BOTTOM, 8)
         panel.SetSizer(sizer)
         self.list_addons.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_toggle)
+        btn_settings.Bind(wx.EVT_BUTTON, self._on_settings)
 
     def _load_addons(self):
         self.list_addons.DeleteAllItems()
@@ -668,6 +726,22 @@ class AddonManagerDialog(wx.Dialog):
             wx.MessageBox(tr("addon_activated", name=name) if ok else tr("addon_load_error", name=name),
                           tr("addon_title"), wx.OK | (wx.ICON_INFORMATION if ok else wx.ICON_ERROR), self)
         self._load_addons()
+
+    def _on_settings(self, event):
+        """Öffnet den addon-spezifischen Einstellungsdialog."""
+        idx = self.list_addons.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox(tr("addon_no_select"), tr("hint_title"), wx.OK, self)
+            return
+        name  = self.list_addons.GetItemText(idx, 0)
+        addon = self.controller.addon_mgr.get_loaded_addons().get(name)
+        if not addon:
+            wx.MessageBox(tr("addon_not_active", name=name), tr("hint_title"),
+                          wx.OK | wx.ICON_INFORMATION, self)
+            return
+        dlg = AddonSettingsDialog(self, addon, name)
+        dlg.ShowModal()
+        dlg.Destroy()
 
     def _on_install(self, event):
         with wx.FileDialog(self, tr("addon_install"), wildcard=tr("wildcard_zip"),

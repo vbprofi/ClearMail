@@ -1,13 +1,18 @@
 {
   "lang_name": "Deutsch",
   "fo_description": "Ordner und Postfächer per Kontextmenü oder Alt+Pfeil sortieren",
-  "fo_move_top":    "Ganz nach oben",
-  "fo_move_up":     "Nach oben verschieben",
-  "fo_move_down":   "Nach unten verschieben",
+  "fo_move_top": "Ganz nach oben",
+  "fo_move_up": "Nach oben verschieben",
+  "fo_move_down": "Nach unten verschieben",
   "fo_move_bottom": "Ganz nach unten",
-  "fo_already_top":    "Das Element befindet sich bereits ganz oben.",
+  "fo_already_top": "Das Element befindet sich bereits ganz oben.",
   "fo_already_bottom": "Das Element befindet sich bereits ganz unten.",
-  "fo_title":       "Position ändern",
-  "fo_not_found":   "Element nicht in der Geschwisterliste gefunden.\nBitte die Anwendung neu starten.",
-  "fo_error_title": "Fehler"
+  "fo_title": "Position ändern",
+  "fo_not_found": "Element nicht in der Geschwisterliste gefunden.\nBitte die Anwendung neu starten.",
+  "fo_error_title": "Fehler",
+  "fo_settings_hotkey": "Alt+Pfeil-Tastaturkürzel aktivieren",
+  "fo_settings_hotkey_hint": "Alt+↑/↓ verschiebt den fokussierten Ordner nach oben/unten.",
+  "fo_settings_sys_order": "Reihenfolge der Systemordner:",
+  "fo_settings_sys_order_hint": "Bestimmt in welcher Reihenfolge Posteingang, Gesendet usw. erscheinen.",
+  "fo_settings_reset": "Reihenfolge zurücksetzen (Thunderbird-Standard)"
 }

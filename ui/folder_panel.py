@@ -190,35 +190,37 @@ class FolderPanel(wx.Panel):
 
     def _add_folder_items(self, parent_item, folders, parent_id):
         """
-        Fügt Ordner-Einträge zum Baum hinzu.
-
         Sortierung (Priorität):
-          1. sort_order-Spalte wenn vorhanden (manuell vom User via FolderOrder-Addon)
-          2. Fallback: FOLDER_ORDER-Typ dann Name (Thunderbird-Standard)
-
-        Das erlaubt dem FolderOrder-Addon die Position beliebig zu setzen
-        ohne dass _add_folder_items die Reihenfolge überschreibt.
+          1. sort_order-Spalte wenn vorhanden (manuell via FolderOrder-Addon)
+          2. Systemordner-Reihenfolge aus fo_sys_order-Einstellung
+          3. Fallback: Thunderbird-Standard
         """
-        FOLDER_ORDER = {
-            "inbox": 0, "sent": 1, "drafts": 2, "outbox": 3,
-            "trash": 4, "spam": 5, "archive": 6, "custom": 7,
-        }
-        level = [dict(f) for f in folders if f["parent_id"] == parent_id]
+        DEFAULT_ORDER = ["inbox", "sent", "drafts", "outbox", "trash", "spam", "archive"]
 
-        # Prüfen ob sort_order in den Daten vorhanden ist
+        # Konfigurierte Systemordner-Reihenfolge lesen
+        try:
+            raw = self.controller.get_setting("fo_sys_order", "")
+            sys_order = raw.split(",") if raw else DEFAULT_ORDER
+        except Exception:
+            sys_order = DEFAULT_ORDER
+
+        # Unbekannte Typen ans Ende
+        def _type_rank(ftype):
+            try:   return sys_order.index(ftype or "custom")
+            except ValueError: return len(sys_order)
+
+        level = [dict(f) for f in folders if f["parent_id"] == parent_id]
         has_sort_order = level and "sort_order" in level[0]
 
         if has_sort_order:
-            # Manuell sortiert – sort_order respektieren, Typ/Name als Tiebreaker
             level.sort(key=lambda f: (
                 int(f.get("sort_order") or 0),
-                FOLDER_ORDER.get(f.get("folder_type") or "custom", 7),
+                _type_rank(f.get("folder_type") or "custom"),
                 (f.get("name") or "").lower()
             ))
         else:
-            # Standard: Thunderbird-Reihenfolge
             level.sort(key=lambda f: (
-                FOLDER_ORDER.get(f.get("folder_type") or "custom", 7),
+                _type_rank(f.get("folder_type") or "custom"),
                 (f.get("name") or "").lower()
             ))
 

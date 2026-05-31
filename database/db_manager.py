@@ -912,6 +912,18 @@ class DatabaseManager:
         if mode == STORAGE_MBOX:
             self._move_mail_mbox(mail_id, source_folder_id, target_folder_id)
             return
+        if mode == STORAGE_SQLITE_PER_ACCOUNT and source_folder_id:
+            src_acc = self._account_id_for_folder(source_folder_id)
+            dst_acc = self._account_id_for_folder(target_folder_id)
+            if src_acc and dst_acc and src_acc != dst_acc:
+                src_conn = self._get_account_mail_conn(src_acc)
+                dst_conn = self._get_account_mail_conn(dst_acc)
+                row = src_conn.execute("SELECT * FROM mails WHERE id=?", (mail_id,)).fetchone()
+                if row:
+                    m = dict(row); m["folder_id"] = target_folder_id; m.pop("id", None)
+                    self._insert_mail_row(dst_conn, m); dst_conn.commit()
+                src_conn.execute("DELETE FROM mails WHERE id=?", (mail_id,)); src_conn.commit()
+                return
         conn = self._mail_conn_for_folder(source_folder_id or target_folder_id)
         conn.execute("UPDATE mails SET folder_id=? WHERE id=?", (target_folder_id, mail_id))
         conn.commit()
@@ -950,6 +962,16 @@ class DatabaseManager:
                             if int(m.get("is_read", 0)) == 0:
                                 count += 1
                         except Exception: pass
+        elif mode == STORAGE_MBOX:
+            # FIX: fehlender mbox-Zweig → Ungelesen-Zähler blieb immer 0
+            try:
+                idx = self._mbox_index_conn()
+                r   = idx.execute(
+                    "SELECT COUNT(*) FROM mbox_index WHERE folder_id=? AND is_read=0",
+                    (folder_id,)).fetchone()
+                count = r[0] if r else 0
+            except Exception:
+                count = 0
         elif mode == STORAGE_SQLITE_PER_ACCOUNT:
             conn = self._mail_conn_for_folder(folder_id)
             r = conn.execute(
@@ -978,30 +1000,42 @@ class DatabaseManager:
         os.makedirs(backup_dir, exist_ok=True)
         mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
 
-        if mode == STORAGE_SQLITE_ONE:
-            if progress_cb: progress_cb(0, 1, "Sichere structure.db…")
+        # structure.db immer sichern (enthält Ordner, Postfächer, Konten-IDs)
+        if os.path.exists(self.structure_db_path):
+            if progress_cb: progress_cb(0, 4, "Sichere structure.db…")
             shutil.copy2(self.structure_db_path,
                          os.path.join(backup_dir, "structure.db"))
-            if progress_cb: progress_cb(1, 1, "Backup abgeschlossen.")
+
+        if mode == STORAGE_SQLITE_ONE:
+            if progress_cb: progress_cb(1, 4, "Backup structure.db (mails)…")
+            # mails sind in structure.db – bereits gesichert oben
 
         elif mode == STORAGE_SQLITE_PER_ACCOUNT:
             accs = self.get_accounts()
             for i, acc in enumerate(accs):
                 db = os.path.join(self.data_dir, f"mailstore_{acc['id']}.db")
                 if os.path.exists(db):
-                    if progress_cb: progress_cb(i, len(accs), f"Sichere {os.path.basename(db)}…")
+                    if progress_cb: progress_cb(i+1, len(accs)+1, f"Sichere {os.path.basename(db)}…")
                     shutil.copy2(db, os.path.join(backup_dir, os.path.basename(db)))
-            if progress_cb: progress_cb(len(accs), len(accs), "Backup abgeschlossen.")
 
         elif mode == STORAGE_FILES:
             store = os.path.join(self.data_dir, "mailstore")
             if os.path.isdir(store):
                 dst = os.path.join(backup_dir, "mailstore")
-                if progress_cb: progress_cb(0, 1, "Sichere Mail-Dateien…")
+                if progress_cb: progress_cb(1, 2, "Sichere Mail-Dateien…")
                 if os.path.exists(dst): shutil.rmtree(dst)
                 shutil.copytree(store, dst)
-                if progress_cb: progress_cb(1, 1, "Backup abgeschlossen.")
 
+        elif mode == STORAGE_MBOX:
+            # FIX: mbox-Ordner + index.db sichern
+            mbox_dir = os.path.join(self.data_dir, "mbox")
+            if os.path.isdir(mbox_dir):
+                dst = os.path.join(backup_dir, "mbox")
+                if progress_cb: progress_cb(1, 2, "Sichere Mbox-Dateien…")
+                if os.path.exists(dst): shutil.rmtree(dst)
+                shutil.copytree(mbox_dir, dst)
+
+        if progress_cb: progress_cb(4, 4, "Backup abgeschlossen.")
         return backup_dir
 
     def _cleanup_old_backend(self, old_mode: str):
@@ -1041,13 +1075,22 @@ class DatabaseManager:
                     except OSError: pass
 
         elif old_mode == STORAGE_MBOX:
-            # .mbox-Dateien und index.db löschen
+            # FIX: Index-DB-Verbindung schließen, sonst schlägt rmtree auf Windows fehl
+            try:
+                if hasattr(self, "_mbox_idx_conn") and self._mbox_idx_conn:
+                    self._mbox_idx_conn.close()
+                    self._mbox_idx_conn = None
+            except Exception:
+                pass
             mbox_dir = os.path.join(self.data_dir, "mbox")
             if os.path.isdir(mbox_dir):
-                try:
-                    shutil.rmtree(mbox_dir)
-                except OSError:
-                    pass
+                import time
+                for attempt in range(3):
+                    try:
+                        shutil.rmtree(mbox_dir)
+                        break
+                    except OSError:
+                        time.sleep(0.3)
 
     def migrate_storage(self, new_mode: str, progress_cb=None):
         old_mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
@@ -1774,8 +1817,10 @@ class DatabaseManager:
         return os.path.join(self._mbox_dir, f"{folder_id}.mbox")
 
     def _mbox_index_conn(self) -> "sqlite3.Connection":
-        """Öffnet (und initialisiert) die Index-DB für den Mbox-Modus."""
+        """Öffnet (und initialisiert) die Index-DB für den Mbox-Modus. Gecacht."""
         import sqlite3 as _sq
+        if getattr(self, "_mbox_idx_conn", None) is not None:
+            return self._mbox_idx_conn
         path = os.path.join(self._mbox_dir, "index.db")
         conn = _sq.connect(path, check_same_thread=False)
         conn.row_factory = _sq.Row
@@ -1801,6 +1846,7 @@ class DatabaseManager:
                 UNIQUE(folder_id, mbox_key)
             )""")
         conn.commit()
+        self._mbox_idx_conn = conn
         return conn
 
     def _get_mails_from_mbox(self, folder_id: int) -> list:

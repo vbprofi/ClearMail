@@ -1,10 +1,17 @@
 {
   "lang_name": "English",
-  "ml_description": "Logs mail events to a log file",
+  "ml_description": "Logs mail events (read, deleted, moved, received) with sender and subject to a log file.",
+  "ml_log_loaded": "MailLogger started.",
+  "ml_log_unloaded": "MailLogger stopped.",
+  "ml_from": "From",
+  "ml_subject": "Subject",
+  "ml_date": "Date",
+  "ml_account": "Account",
+  "ml_no_subject": "(no subject)",
+  "ml_new_mails": "{count} new mail(s) received",
   "ml_menu_open_log": "Open log file (MailLogger)",
-  "ml_log_loaded": "Addon loaded",
-  "ml_log_unloaded": "Addon unloaded",
-  "ml_log_mail_read": "Mail read: id={mail_id}",
-  "ml_log_mail_deleted": "Mail deleted: id={mail_id}",
-  "ml_log_mail_moved": "Mail moved: id={mail_id} → folder={folder_id}"
+  "ml_log_not_found": "Log file not found:\n{path}",
+  "ml_settings_path": "Log file path:",
+  "ml_settings_log_all": "Log all mails (not only unread)",
+  "ml_settings_log_hint": "If disabled: only log mails opened for the first time."
 }

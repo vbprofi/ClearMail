@@ -58,6 +58,13 @@ class AutoFetchThread(threading.Thread):
                 )
                 if count > 0:
                     log("info", f"AutoFetch: {count} neue Mail(s) für account={acc_name}")
+                    # Addon-Event im Haupt-Thread feuern
+                    wx.CallAfter(
+                        self.controller.addon_mgr.fire,
+                        "mail_received",
+                        {"count": count, "account_name": acc_name,
+                         "account_id": self.account_id}
+                    )
                     wx.CallAfter(self.on_new_mails, count)
             except Exception as e:
                 log("error", f"AutoFetch error (account={acc_name}): {e}")

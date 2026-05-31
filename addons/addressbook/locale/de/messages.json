@@ -48,5 +48,21 @@
   "ab_del_contact_title": "Kontakt löschen",
   "ab_no_group_sel": "Bitte zuerst eine Gruppe auswählen.",
   "ab_no_contact_sel": "Bitte zuerst einen Kontakt auswählen.",
-  "ab_menu_open": "Adressbuch öffnen"
+  "ab_menu_open": "Adressbuch öffnen",
+  "ab_settings_fields_label": "Angezeigte Felder:",
+  "ab_settings_fields_hint": "Wähle die Felder die im Adressbuch angezeigt werden.",
+  "ab_settings_fields_required": "Mindestens ein Feld muss ausgewählt sein.",
+  "ab_settings_sample_data": "Beispieldaten beim ersten Start einfügen",
+  "ab_settings_sample_hint": "Fügt Max Mustermann und Anna Schmidt ein wenn die DB leer ist.",
+  "ab_settings_db_path": "Datenbankpfad: {path}",
+  "ab_field_firstname": "Vorname",
+  "ab_field_lastname": "Nachname",
+  "ab_field_email": "E-Mail (primär)",
+  "ab_field_email2": "E-Mail (sekundär)",
+  "ab_field_phone": "Telefon",
+  "ab_field_mobile": "Mobil",
+  "ab_field_org": "Organisation",
+  "ab_field_title": "Titel",
+  "ab_field_address": "Adresse",
+  "ab_field_notes": "Notizen"
 }

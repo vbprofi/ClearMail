@@ -1,13 +1,18 @@
 {
   "lang_name": "English",
   "fo_description": "Sort folders and mailboxes via context menu or Alt+Arrow keys",
-  "fo_move_top":    "Move to top",
-  "fo_move_up":     "Move up",
-  "fo_move_down":   "Move down",
+  "fo_move_top": "Move to top",
+  "fo_move_up": "Move up",
+  "fo_move_down": "Move down",
   "fo_move_bottom": "Move to bottom",
-  "fo_already_top":    "The item is already at the top.",
+  "fo_already_top": "The item is already at the top.",
   "fo_already_bottom": "The item is already at the bottom.",
-  "fo_title":       "Change position",
-  "fo_not_found":   "Item not found in sibling list.\nPlease restart the application.",
-  "fo_error_title": "Error"
+  "fo_title": "Change position",
+  "fo_not_found": "Item not found in sibling list.\nPlease restart the application.",
+  "fo_error_title": "Error",
+  "fo_settings_hotkey": "Enable Alt+Arrow keyboard shortcut",
+  "fo_settings_hotkey_hint": "Alt+↑/↓ moves the focused folder up/down.",
+  "fo_settings_sys_order": "System folder order:",
+  "fo_settings_sys_order_hint": "Determines the order of Inbox, Sent, etc.",
+  "fo_settings_reset": "Reset order (Thunderbird default)"
 }

@@ -40,6 +40,9 @@ class Addon(AddonBase):
     #  Kontextmenü (wird von FolderPanel eingebunden)                    #
     # ------------------------------------------------------------------ #
 
+    def get_settings_panel(self, parent) -> "wx.Panel":
+        return FolderOrderSettingsPanel(parent, self.controller)
+
     def get_folder_context_items(self, item_type: str, item_data: dict) -> list:
         if item_type not in ("folder", "mailbox") or not item_data:
             return []
@@ -80,6 +83,10 @@ class Addon(AddonBase):
             pass
 
     def _on_tree_key(self, event: wx.KeyEvent):
+        # Tastaturkürzel nur wenn in Einstellungen aktiviert
+        if self.controller.get_setting("fo_hotkey_enabled", "1") != "1":
+            event.Skip()
+            return
         key = event.GetKeyCode()
         alt = event.AltDown()
         if not alt or key not in (wx.WXK_UP, wx.WXK_DOWN):
@@ -232,3 +239,99 @@ class Addon(AddonBase):
             return None
         frame = app.GetTopWindow()
         return getattr(frame, "folder_panel", None)
+
+
+# ------------------------------------------------------------------ #
+#  Addon-Einstellungs-Panel                                          #
+# ------------------------------------------------------------------ #
+
+class FolderOrderSettingsPanel(wx.Panel):
+    """
+    Einstellungen für FolderOrder:
+      - Tastaturkürzel Alt+Pfeil aktivieren/deaktivieren
+      - Sortierung zurücksetzen (alle sort_order auf Thunderbird-Standard)
+      - Systemordner-Reihenfolge anpassen (kommt vor benutzerdefinierten Ordnern)
+    """
+
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self._ctrl = controller
+        self._build()
+        self._load()
+
+    def _build(self):
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Tastaturkürzel
+        self.chk_hotkey = wx.CheckBox(self, label=tr("fo_settings_hotkey"))
+        self.chk_hotkey.SetName(tr("fo_settings_hotkey"))
+        sizer.Add(self.chk_hotkey, 0, wx.ALL, 8)
+        lbl_hotkey = wx.StaticText(self, label=tr("fo_settings_hotkey_hint"))
+        lbl_hotkey.SetForegroundColour(wx.Colour(100, 100, 100))
+        sizer.Add(lbl_hotkey, 0, wx.LEFT | wx.BOTTOM, 8)
+
+        sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        # Systemordner-Reihenfolge
+        lbl_order = wx.StaticText(self, label=tr("fo_settings_sys_order"))
+        lbl_order.SetFont(lbl_order.GetFont().Bold())
+        sizer.Add(lbl_order, 0, wx.ALL, 8)
+        lbl_order_hint = wx.StaticText(self, label=tr("fo_settings_sys_order_hint"))
+        lbl_order_hint.SetForegroundColour(wx.Colour(100, 100, 100))
+        sizer.Add(lbl_order_hint, 0, wx.LEFT | wx.BOTTOM, 8)
+
+        # System-Ordner-Typen Reihenfolge (Drag-ListBox)
+        self._sys_types = ["inbox", "sent", "drafts", "outbox", "trash", "spam", "archive"]
+        self.lst_order = wx.ListBox(self, choices=[tr(f"folder_{t}") for t in self._sys_types],
+                                    style=wx.LB_SINGLE)
+        self.lst_order.SetName(tr("fo_settings_sys_order"))
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_up   = wx.Button(self, label="▲ " + tr("fo_move_up"),   size=(120, -1))
+        btn_down = wx.Button(self, label="▼ " + tr("fo_move_down"), size=(120, -1))
+        btn_row.Add(btn_up, 0, wx.RIGHT, 6)
+        btn_row.Add(btn_down, 0)
+        sizer.Add(self.lst_order, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        sizer.Add(btn_row, 0, wx.LEFT | wx.BOTTOM, 8)
+
+        sizer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        # Reset
+        btn_reset = wx.Button(self, label=tr("fo_settings_reset"))
+        sizer.Add(btn_reset, 0, wx.ALL, 8)
+
+        self.SetSizer(sizer)
+        btn_up.Bind(wx.EVT_BUTTON,   lambda e: self._shift(-1))
+        btn_down.Bind(wx.EVT_BUTTON, lambda e: self._shift(+1))
+        btn_reset.Bind(wx.EVT_BUTTON, self._on_reset)
+
+    def _load(self):
+        self.chk_hotkey.SetValue(
+            self._ctrl.get_setting("fo_hotkey_enabled", "1") == "1")
+        order_raw = self._ctrl.get_setting("fo_sys_order", "")
+        if order_raw:
+            stored = order_raw.split(",")
+            # Reihenfolge anwenden, fehlende anhängen
+            known = [t for t in stored if t in self._sys_types]
+            rest  = [t for t in self._sys_types if t not in known]
+            self._sys_types = known + rest
+        self.lst_order.Set([tr(f"folder_{t}") for t in self._sys_types])
+
+    def _shift(self, direction: int):
+        idx = self.lst_order.GetSelection()
+        if idx < 0: return
+        new_idx = idx + direction
+        if new_idx < 0 or new_idx >= len(self._sys_types): return
+        self._sys_types[idx], self._sys_types[new_idx] = (
+            self._sys_types[new_idx], self._sys_types[idx])
+        self.lst_order.Set([tr(f"folder_{t}") for t in self._sys_types])
+        self.lst_order.SetSelection(new_idx)
+
+    def _on_reset(self, event):
+        self._sys_types = ["inbox", "sent", "drafts", "outbox", "trash", "spam", "archive"]
+        self.lst_order.Set([tr(f"folder_{t}") for t in self._sys_types])
+        self._ctrl.set_setting("fo_sys_order", "")
+
+    def save(self):
+        self._ctrl.set_setting("fo_hotkey_enabled",
+                               "1" if self.chk_hotkey.GetValue() else "0")
+        self._ctrl.set_setting("fo_sys_order", ",".join(self._sys_types))

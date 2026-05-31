@@ -48,5 +48,21 @@
   "ab_del_contact_title": "Delete Contact",
   "ab_no_group_sel": "Please select a group first.",
   "ab_no_contact_sel": "Please select a contact first.",
-  "ab_menu_open": "Open Address Book"
+  "ab_menu_open": "Open Address Book",
+  "ab_settings_fields_label": "Visible fields:",
+  "ab_settings_fields_hint": "Choose which fields are shown in the address book.",
+  "ab_settings_fields_required": "At least one field must be selected.",
+  "ab_settings_sample_data": "Insert sample data on first start",
+  "ab_settings_sample_hint": "Inserts Max Mustermann and Anna Schmidt if the DB is empty.",
+  "ab_settings_db_path": "Database path: {path}",
+  "ab_field_firstname": "First name",
+  "ab_field_lastname": "Last name",
+  "ab_field_email": "Email (primary)",
+  "ab_field_email2": "Email (secondary)",
+  "ab_field_phone": "Phone",
+  "ab_field_mobile": "Mobile",
+  "ab_field_org": "Organization",
+  "ab_field_title": "Title",
+  "ab_field_address": "Address",
+  "ab_field_notes": "Notes"
 }
