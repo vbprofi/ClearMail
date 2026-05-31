@@ -350,5 +350,17 @@
   "empty_trash_done": "{count} Mail(s) gelöscht.",
   "offline_mode_on": "ClearMail ist jetzt offline.",
   "offline_mode_off": "ClearMail ist jetzt online.",
-  "fetch_new_account_now": "Mails von Konto \"{name}\" jetzt herunterladen?"
+  "fetch_new_account_now": "Mails von Konto \"{name}\" jetzt herunterladen?",
+  "settings_sound_section": "Benachrichtigung bei neuen Mails",
+  "settings_sound_mode": "Ton:",
+  "settings_sound_none": "Kein Ton",
+  "settings_sound_system": "Systemton",
+  "settings_sound_beep": "Einfacher Piepton",
+  "settings_sound_wav": "WAV-Datei",
+  "settings_sound_wav_path": "WAV-Datei:",
+  "settings_sound_wav_browse": "Durchsuchen…",
+  "settings_sound_beep_freq": "Frequenz (Hz):",
+  "settings_sound_beep_dur": "Länge (ms):",
+  "settings_sound_test": "Testen",
+  "settings_sound_wav_filter": "WAV-Dateien (*.wav)|*.wav|Alle Dateien (*.*)|*.*"
 }

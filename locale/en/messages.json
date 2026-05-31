@@ -350,5 +350,17 @@
   "ctx_delete_perm": "Delete permanently\tDel",
   "ctx_addrbook": "Open address book",
   "ctx_log_mail": "Open log file (MailLogger)",
-  "ctx_log_dev": "Open log file (Developer LOG)"
+  "ctx_log_dev": "Open log file (Developer LOG)",
+  "settings_sound_section": "Notification for new mails",
+  "settings_sound_mode": "Sound:",
+  "settings_sound_none": "No sound",
+  "settings_sound_system": "System sound",
+  "settings_sound_beep": "Simple beep",
+  "settings_sound_wav": "WAV file",
+  "settings_sound_wav_path": "WAV file:",
+  "settings_sound_wav_browse": "Browse…",
+  "settings_sound_beep_freq": "Frequency (Hz):",
+  "settings_sound_beep_dur": "Duration (ms):",
+  "settings_sound_test": "Test",
+  "settings_sound_wav_filter": "WAV files (*.wav)|*.wav|All files (*.*)|*.*"
 }

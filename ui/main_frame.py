@@ -747,6 +747,9 @@ class MainFrame(wx.Frame):
             self.mi_fetch_cur.Enable(True)
             self._hide_gauge()
             self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
+            if count > 0:
+                from core.sound_notify import play_notification
+                play_notification(self.controller)
             self.folder_panel.reload()
             if self._selected_folder_id:
                 saved_mail_id = self._selected_mail_id
@@ -1168,20 +1171,19 @@ class MainFrame(wx.Frame):
     def _on_auto_fetch_done(self, count: int):
         """
         Wird nach erfolgreichem Auto-Fetch im Haupt-Thread aufgerufen.
-
-        FIX: Speichert den aktuell fokussierten Mail-Index VOR dem Neuladen
-        und stellt ihn NACH dem Neuladen wieder her, damit der Fokus nicht
-        verloren geht wenn neue Mails eintreffen.
+        Stellt Mail- und Ordner-Fokus wieder her und spielt Benachrichtigungston.
         """
         self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
+        # Ton abspielen wenn neue Mails eingegangen sind
+        if count > 0:
+            from core.sound_notify import play_notification
+            play_notification(self.controller)
         self.folder_panel.reload()
         if self._selected_folder_id:
-            # Fokus sichern
             saved_mail_id = self._selected_mail_id
             mails = self.controller.get_mails(self._selected_folder_id)
             self.mail_list_panel.load_mails(mails)
             self.folder_panel.refresh_folder_unread(self._selected_folder_id)
-            # Fokus wiederherstellen
             if saved_mail_id:
                 wx.CallAfter(self.mail_list_panel.select_mail_by_id, saved_mail_id)
 

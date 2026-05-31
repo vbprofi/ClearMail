@@ -209,8 +209,66 @@ class SettingsDialog(wx.Dialog):
             pg1, gs1, tr("settings_mark_unread_after"),
             lambda p: wx.SpinCtrl(p, min=0, max=120, initial=0),
             name=tr("settings_mark_unread_after"))
+
+        # ---- Benachrichtigungston ----
+        # Trennlinie + Abschnittstitel
+        gs1.Add(wx.StaticLine(pg1), 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 6)
+        gs1.Add(wx.StaticLine(pg1), 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 6)
+        lbl_section = wx.StaticText(pg1, label=tr("settings_sound_section"))
+        lbl_section.SetFont(lbl_section.GetFont().Bold())
+        gs1.Add(wx.StaticText(pg1, label=""), 0)
+        gs1.Add(lbl_section, 0)
+
+        # Modus-Auswahl
+        self._sound_modes  = ["none", "system", "beep", "wav"]
+        self._sound_labels = [
+            tr("settings_sound_none"),
+            tr("settings_sound_system"),
+            tr("settings_sound_beep"),
+            tr("settings_sound_wav"),
+        ]
+        self.cho_sound = add_labeled_field(
+            pg1, gs1, tr("settings_sound_mode"),
+            lambda p: wx.Choice(p, choices=self._sound_labels),
+            name=tr("settings_sound_mode"))
+        self.cho_sound.SetSelection(0)
+
+        # WAV-Pfad-Zeile
+        lbl_wav = wx.StaticText(pg1, label=tr("settings_sound_wav_path"))
+        gs1.Add(lbl_wav, 0, wx.ALIGN_CENTER_VERTICAL)
+        wav_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.txt_sound_wav = wx.TextCtrl(pg1)
+        self.txt_sound_wav.SetName(tr("settings_sound_wav_path"))
+        btn_wav_browse = wx.Button(pg1, label=tr("settings_sound_wav_browse"))
+        btn_wav_browse.SetName(tr("settings_sound_wav_browse"))
+        wav_row.Add(self.txt_sound_wav, 1, wx.EXPAND | wx.RIGHT, 4)
+        wav_row.Add(btn_wav_browse, 0)
+        gs1.Add(wav_row, 1, wx.EXPAND)
+
+        # Frequenz + Länge (Beep)
+        self.spn_sound_freq = add_labeled_field(
+            pg1, gs1, tr("settings_sound_beep_freq"),
+            lambda p: wx.SpinCtrl(p, min=37, max=32767, initial=880),
+            name=tr("settings_sound_beep_freq"))
+        self.spn_sound_dur = add_labeled_field(
+            pg1, gs1, tr("settings_sound_beep_dur"),
+            lambda p: wx.SpinCtrl(p, min=10, max=5000, initial=200),
+            name=tr("settings_sound_beep_dur"))
+
+        # Test-Button
+        gs1.Add(wx.StaticText(pg1, label=""), 0)
+        btn_sound_test = wx.Button(pg1, label=tr("settings_sound_test"))
+        btn_sound_test.SetName(tr("settings_sound_test"))
+        gs1.Add(btn_sound_test, 0)
+
         pg1.SetSizer(self._w(gs1))
         nb.AddPage(pg1, tr("settings_tab_general"))
+
+        # Events für Sound-Sektion
+        self.cho_sound.Bind(wx.EVT_CHOICE,  self._on_sound_mode_changed)
+        btn_wav_browse.Bind(wx.EVT_BUTTON,  self._on_browse_wav)
+        btn_sound_test.Bind(wx.EVT_BUTTON,  self._on_test_sound)
+        self._on_sound_mode_changed(None)   # initiale Sichtbarkeit
 
         # ---- Display ----
         pg2 = wx.Panel(nb)
@@ -313,6 +371,43 @@ class SettingsDialog(wx.Dialog):
         s.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         return s
 
+    def _on_sound_mode_changed(self, event):
+        """Zeigt/versteckt WAV- und Beep-Felder je nach Modus."""
+        idx  = self.cho_sound.GetSelection()
+        mode = self._sound_modes[idx] if 0 <= idx < len(self._sound_modes) else "none"
+        is_wav  = mode == "wav"
+        is_beep = mode == "beep"
+        self.txt_sound_wav.Enable(is_wav)
+        # btn_wav_browse ist Geschwister-Widget – über Parent finden
+        for child in self.txt_sound_wav.GetParent().GetChildren():
+            if hasattr(child, "GetLabel") and child.GetLabel() == tr("settings_sound_wav_browse"):
+                child.Enable(is_wav)
+                break
+        self.spn_sound_freq.Enable(is_beep)
+        self.spn_sound_dur.Enable(is_beep)
+        if event:
+            event.Skip()
+
+    def _on_browse_wav(self, event):
+        with wx.FileDialog(
+            self, tr("settings_sound_wav_path"),
+            wildcard=tr("settings_sound_wav_filter"),
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST
+        ) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_sound_wav.SetValue(dlg.GetPath())
+
+    def _on_test_sound(self, event):
+        from core.sound_notify import test_sound
+        idx  = self.cho_sound.GetSelection()
+        mode = self._sound_modes[idx] if 0 <= idx < len(self._sound_modes) else "none"
+        test_sound(
+            mode=mode,
+            wav_path=self.txt_sound_wav.GetValue().strip(),
+            freq=self.spn_sound_freq.GetValue(),
+            duration_ms=self.spn_sound_dur.GetValue(),
+        )
+
     def _on_open_log(self, event):
         import os, sys, subprocess
         path = self.txt_log_path.GetValue().strip()
@@ -354,6 +449,15 @@ class SettingsDialog(wx.Dialog):
         log_p = g("dev_log_path", _os2.path.join(_os2.path.expanduser("~"), ".mailclient", "protocol.log"))
         self.txt_log_path.SetValue(log_p)
 
+        # Sound
+        cur_mode = g("sound_mode", "none")
+        idx_snd  = self._sound_modes.index(cur_mode) if cur_mode in self._sound_modes else 0
+        self.cho_sound.SetSelection(idx_snd)
+        self.txt_sound_wav.SetValue(g("sound_wav_path", ""))
+        self.spn_sound_freq.SetValue(int(g("sound_beep_freq",   "880")))
+        self.spn_sound_dur.SetValue(int(g("sound_beep_dur_ms",  "200")))
+        self._on_sound_mode_changed(None)
+
     def _on_save(self, event):
         s   = self.controller.set_setting
         g   = self.controller.get_setting
@@ -379,6 +483,13 @@ class SettingsDialog(wx.Dialog):
             setup_logging(self.txt_log_path.GetValue().strip())
         else:
             disable_logging()
+
+        # Sound
+        idx_snd = self.cho_sound.GetSelection()
+        s("sound_mode",       self._sound_modes[idx_snd] if 0 <= idx_snd < len(self._sound_modes) else "none")
+        s("sound_wav_path",   self.txt_sound_wav.GetValue().strip())
+        s("sound_beep_freq",  str(self.spn_sound_freq.GetValue()))
+        s("sound_beep_dur_ms", str(self.spn_sound_dur.GetValue()))
 
         # Storage-Modus prüfen
         idx_st   = self.cho_storage.GetSelection()
