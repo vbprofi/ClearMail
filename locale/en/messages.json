@@ -2,8 +2,8 @@
   "app_title": "ClearMail",
   "menu_file": "&File",
   "menu_file_new": "&New E-Mail\tCtrl+N",
-  "menu_file_open": "&Open (.email)\tCtrl+O",
-  "menu_file_save": "&Save (.email)\tCtrl+S",
+  "menu_file_open": "&Open\tCtrl+O",
+  "menu_file_save": "&Save\tCtrl+S",
   "menu_file_save_txt": "Save as .&txt",
   "menu_file_print": "&Print\tCtrl+P",
   "menu_file_exit": "E&xit\tAlt+F4",
@@ -81,7 +81,7 @@
   "dlg_cancel": "Cancel",
   "dlg_save": "Save",
   "dlg_close": "Close",
-  "ctx_open": "Open / Preview",
+  "ctx_open": "Open",
   "ctx_reply": "Reply",
   "ctx_forward": "Forward",
   "ctx_save_email": "Save as .email",
@@ -344,5 +344,11 @@
   "empty_trash_done": "{count} message(s) deleted.",
   "offline_mode_on": "ClearMail is now offline.",
   "offline_mode_off": "ClearMail is now online.",
-  "fetch_new_account_now": "Download mails from account \"{name}\" now?"
+  "fetch_new_account_now": "Download mails from account \"{name}\" now?",
+  "ctx_save_eml": "Save as .eml",
+  "ctx_delete_trash": "Delete → Trash\tDel",
+  "ctx_delete_perm": "Delete permanently\tDel",
+  "ctx_addrbook": "Open address book",
+  "ctx_log_mail": "Open log file (MailLogger)",
+  "ctx_log_dev": "Open log file (Developer LOG)"
 }

@@ -485,37 +485,46 @@ class MainFrame(wx.Frame):
             self.controller.mark_mail_flagged(self._selected_mail_id, new_flagged, folder_id=fid)
             self.mail_list_panel.reload_current_folder()
 
+    def _on_save_eml(self, event=None):
+        if not self._selected_mail_id:
+            wx.MessageBox(tr("hint_select_mail"), tr("hint_title"), wx.OK, self); return
+        with wx.FileDialog(self, tr("save_email_title"),
+                           wildcard="EML-Datei (*.eml)|*.eml",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as d:
+            if d.ShowModal() == wx.ID_OK:
+                path = d.GetPath()
+                if not path.lower().endswith(".eml"):
+                    path += ".eml"
+                ok = self.controller.save_mail_as_eml(
+                    self._selected_mail_id, path, folder_id=self._selected_folder_id)
+                if not ok:
+                    wx.MessageBox(tr("error_save_file"), tr("error_title"),
+                                  wx.OK | wx.ICON_ERROR, self)
+
     def _on_copy_mail(self, event=None):
-        """Mail in einen anderen Ordner kopieren."""
-        if not self._selected_mail_id: return
-        dlg = FolderPickerDialog(self, self.controller,
-                                 title=tr("ctx_copy_to_folder"))
-        if dlg.ShowModal() == wx.ID_OK:
+        """Mail in einen anderen Ordner kopieren – via FolderPickerDialog."""
+        if not self._selected_mail_id:
+            return
+        dlg = FolderPickerDialog(self, self.controller, title=tr("ctx_copy_to_folder"))
+        if dlg.ShowModal() == wx.ID_OK and dlg.selected_folder_id:
             target_fid = dlg.selected_folder_id
-            if target_fid:
-                self.controller.copy_mail(
-                    self._selected_mail_id, target_fid,
-                    source_folder_id=self._selected_folder_id)
-                self.folder_panel.refresh_folder_unread(target_fid)
+            if target_fid != self._selected_folder_id:
+                self._copy_mail(self._selected_mail_id, target_fid,
+                                self._selected_folder_id)
         dlg.Destroy()
 
     def _on_move_mail(self, event=None):
-        """Mail in einen anderen Ordner verschieben."""
-        if not self._selected_mail_id: return
-        dlg = FolderPickerDialog(self, self.controller,
-                                 title=tr("ctx_move_to"))
-        if dlg.ShowModal() == wx.ID_OK:
+        """Mail in einen anderen Ordner verschieben – via FolderPickerDialog."""
+        if not self._selected_mail_id:
+            return
+        dlg = FolderPickerDialog(self, self.controller, title=tr("ctx_move_to"))
+        if dlg.ShowModal() == wx.ID_OK and dlg.selected_folder_id:
             target_fid = dlg.selected_folder_id
             if target_fid and target_fid != self._selected_folder_id:
-                self.controller.move_mail(
-                    self._selected_mail_id, target_fid,
-                    source_folder_id=self._selected_folder_id)
-                if self._selected_folder_id:
-                    self.folder_panel.refresh_folder_unread(self._selected_folder_id)
-                self.folder_panel.refresh_folder_unread(target_fid)
-                self.mail_list_panel.remove_mail(self._selected_mail_id)
-                self.mail_preview_panel.clear()
+                self._move_mail(self._selected_mail_id, target_fid,
+                                self._selected_folder_id)
         dlg.Destroy()
+
 
     def _on_search(self, event=None):
         """Suchfenster öffnen."""
@@ -704,19 +713,8 @@ class MainFrame(wx.Frame):
                 if wx.MessageBox(tr("delete_account_msg", name=acc["name"]),
                                  tr("delete_account_title"),
                                  wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) == wx.YES:
-                    # Prüfen ob selektierter Ordner zum zu löschenden Konto gehört
-                    if self._selected_mailbox_id:
-                        sc = self.controller.db._get_structure_conn()
-                        mb_row = sc.execute(
-                            "SELECT id FROM mailboxes WHERE account_id=?", (acc["id"],)
-                        ).fetchone()
-                        if mb_row and mb_row[0] == self._selected_mailbox_id:
-                            self._selected_folder_id  = None
-                            self._selected_mail_id    = None
-                            self._selected_mailbox_id = None
-                            self.folder_panel._selected_folder_id = None
                     self.controller.delete_account(acc["id"])
-                    self.folder_panel.reload()
+                    self.folder_panel.reload()  # Baumstruktur aktualisieren
                     self.mail_list_panel.load_mails([])
                     self.mail_preview_panel.clear()
 
@@ -749,7 +747,6 @@ class MainFrame(wx.Frame):
             self.mi_fetch_cur.Enable(True)
             self._hide_gauge()
             self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
-            # reload() stellt selektierten Ordner intern still wieder her
             self.folder_panel.reload()
             if self._selected_folder_id:
                 saved_mail_id = self._selected_mail_id
@@ -797,34 +794,99 @@ class MainFrame(wx.Frame):
         self._run_fetch(account_id=acc_id)
 
     def _on_empty_trash(self, event):
-        """Papierkorb leeren – alle Mails endgültig löschen."""
+        """
+        Papierkorb leeren:
+        1. Alle Mails in Papierkorb-Ordnern inkl. Unterordner lokal löschen
+        2. Anschließend auf dem IMAP-Server versuchen zu löschen
+        3. Unterordner im Papierkorb werden ebenfalls entfernt
+        """
         if wx.MessageBox(tr("empty_trash_confirm"), tr("menu_file_empty_trash"),
                          wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) != wx.YES:
             return
+
         count = 0
         for mb in self.controller.get_mailboxes():
-            for f in self.controller.get_folders(mb["id"]):
-                if dict(f).get("folder_type") == "trash":
-                    fid   = f["id"]
+            all_folders = {dict(f)["id"]: dict(f) for f in self.controller.get_folders(mb["id"])}
+            # Alle Papierkorb-Ordner (inkl. Unterordner) finden
+            trash_roots = [fid for fid, f in all_folders.items()
+                           if f.get("folder_type") == "trash"]
+
+            def _collect(fid):
+                """Alle IDs eines Ordners und seiner Unterordner."""
+                ids = [fid]
+                for child_id, cf in all_folders.items():
+                    if cf.get("parent_id") == fid:
+                        ids.extend(_collect(child_id))
+                return ids
+
+            for trash_root_id in trash_roots:
+                folder_ids = _collect(trash_root_id)
+                for fid in folder_ids:
                     mails = self.controller.get_mails(fid)
                     for m in mails:
-                        self.controller.db.delete_mail(dict(m)["id"], fid)
+                        m = dict(m)
+                        # IMAP-Server: UID/Pfad vor dem DB-Delete holen
+                        uid, imap_path, acc = self.controller._resolve_mail_imap(
+                            m["id"], fid)
+                        # Lokal löschen
+                        self.controller.db.delete_mail(m["id"], fid)
                         count += 1
+                        # IMAP: endgültig löschen (fire-and-forget)
+                        if uid and imap_path and acc:
+                            import threading
+                            from core.app_controller import _make_imap
+                            def _del(uid=uid, path=imap_path, acc=acc):
+                                from core.protocol_runner import log
+                                try:
+                                    with _make_imap(acc) as imap:
+                                        imap.delete_mail(uid, path)
+                                except Exception as e:
+                                    log("warning", f"IMAP empty_trash uid={uid}: {e}")
+                            threading.Thread(target=_del, daemon=True).start()
                     self.controller.db.update_folder_unread(fid)
-        wx.MessageBox(tr("empty_trash_done", count=count),
-                      tr("hint_title"), wx.OK, self)
+                    # Unterordner im Papierkorb aus DB löschen (nicht den Root)
+                    if fid != trash_root_id:
+                        sc = self.controller.db._get_structure_conn()
+                        sc.execute("DELETE FROM folders WHERE id=?", (fid,))
+                        sc.commit()
+
+        wx.MessageBox(tr("empty_trash_done", count=count), tr("hint_title"), wx.OK, self)
         self.folder_panel.reload()
         if self._selected_folder_id:
             mails = self.controller.get_mails(self._selected_folder_id)
             self.mail_list_panel.load_mails(mails)
+            self.mail_preview_panel.clear()
 
     def _on_offline_toggle(self, event):
-        """Offline-Modus umschalten."""
+        """
+        Offline-Modus umschalten.
+        Aktiv:    Auto-Fetch stoppen, alle Netzwerk-Menüpunkte deaktivieren,
+                  laufende Verbindungen werden beim nächsten Zyklus beendet.
+        Inaktiv:  Alle Menüpunkte re-aktivieren, Auto-Fetch wieder starten.
+        """
         self._is_offline = self.mi_offline_work.IsChecked()
-        self.mi_offline_sync.Enable(self._is_offline)
-        msg = tr("offline_mode_on") if self._is_offline else tr("offline_mode_off")
-        self.status_bar.SetStatusText(msg, 0)
         self.controller.set_setting("offline_mode", "1" if self._is_offline else "0")
+
+        # Menüpunkte die Netzwerkzugriff erfordern
+        network_items = [
+            self.mi_fetch_all,
+            self.mi_fetch_cur,
+            self.mi_send_outbox,
+            self.mi_offline_sync,
+        ]
+        for mi in network_items:
+            mi.Enable(not self._is_offline)
+
+        if self._is_offline:
+            # Auto-Fetch sofort stoppen
+            self._auto_fetch.stop_all()
+            self.status_bar.SetStatusText(tr("offline_mode_on"), 0)
+        else:
+            # Menü-Sync: offline_sync nur wenn offline aktiv (jetzt inaktiv)
+            self.mi_offline_sync.Enable(False)
+            self.status_bar.SetStatusText(tr("offline_mode_off"), 0)
+            # Auto-Fetch wieder starten wenn eingestellt
+            wx.CallAfter(self._start_auto_fetch)
 
     def _on_offline_sync(self, event):
         """Im Offline-Modus: jetzt synchronisieren – mit Statusbar + Gauge."""
@@ -850,7 +912,6 @@ class MainFrame(wx.Frame):
             self._hide_gauge()
             self.status_bar.SetStatusText(
                 tr("outbox_empty") if count == 0 else tr("smtp_send_ok", count=count), 0)
-            # reload() stellt selektierten Ordner intern still wieder her
             self.folder_panel.reload()
             if self._selected_folder_id:
                 mails = self.controller.get_mails(self._selected_folder_id)
@@ -949,16 +1010,20 @@ class MainFrame(wx.Frame):
     # ------------------------------------------------------------------ #
 
     def _show_mail_context_menu(self, event):
-        menu = wx.Menu()
+        menu     = wx.Menu()
         use_trash = self.controller.get_setting("delete_to_trash", "1") == "1"
-        del_label = tr("ctx_delete") + (" → " + tr("folder_trash") if use_trash else "")
+        dev_mode  = self.controller.get_setting("dev_logging", "0") == "1"
+
+        # Löschen-Label: zeigt ob Papierkorb oder endgültig
+        del_label = (tr("ctx_delete_trash") if use_trash else tr("ctx_delete_perm"))
 
         items = [
             (tr("ctx_open"),        lambda e: self._on_open_mail_viewer(self._selected_mail_id)),
+            None,
             (tr("ctx_reply"),       self._on_reply),
             (tr("ctx_forward"),     self._on_forward),
             None,
-            (tr("ctx_save_email"),  self._on_save_email),
+            (tr("ctx_save_eml"),    self._on_save_eml),
             (tr("ctx_save_txt"),    self._on_save_txt),
             None,
             (tr("ctx_copy_to"),     self._on_copy_mail),
@@ -978,46 +1043,45 @@ class MainFrame(wx.Frame):
                 mi = menu.Append(wx.ID_ANY, lbl)
                 self.Bind(wx.EVT_MENU, fn, mi)
 
-        # ---- Kopieren / Verschieben nach Ordner ----
-        menu.AppendSeparator()
-        self._append_folder_submenu(menu, tr("ctx_copy_to"), copy=True)
-        self._append_folder_submenu(menu, tr("ctx_move_to"), copy=False)
+        # Addon-Einträge (Adressbuch, MailLogger)
+        addon_items = self.controller.addon_mgr.get_all_menu_items()
+        # Adressbuch-Eintrag immer anzeigen
+        addr_items = [x for x in addon_items if "adress" in x.get("label","").lower()
+                      or "address" in x.get("label","").lower()
+                      or "adressbuch" in x.get("label","").lower()]
+        log_items  = [x for x in addon_items if x not in addr_items]
 
-        for entry in self.controller.addon_mgr.get_all_menu_items():
+        if addr_items or log_items:
             menu.AppendSeparator()
-            mi = menu.Append(wx.ID_ANY, entry["label"])
+        for entry in addr_items:
+            mi = menu.Append(wx.ID_ANY, tr("ctx_addrbook"))
+            self.Bind(wx.EVT_MENU,
+                      lambda e, h=entry["handler"]: h(self._selected_mail_id), mi)
+        for entry in log_items:
+            mi = menu.Append(wx.ID_ANY, tr("ctx_log_mail"))
             self.Bind(wx.EVT_MENU,
                       lambda e, h=entry["handler"]: h(self._selected_mail_id), mi)
 
+        # Entwickler-LOG nur wenn Entwicklermodus aktiv
+        if dev_mode:
+            dev_log_path = self.controller.get_setting(
+                "dev_log_path",
+                os.path.join(os.path.expanduser("~"), ".mailclient", "protocol.log")
+            )
+            def _open_dev_log(e, p=dev_log_path):
+                if os.path.exists(p):
+                    try:
+                        if os.name == "nt": os.startfile(p)
+                        else:
+                            import subprocess
+                            subprocess.Popen(["xdg-open", p])
+                    except Exception: pass
+            menu.AppendSeparator()
+            mi = menu.Append(wx.ID_ANY, tr("ctx_log_dev"))
+            self.Bind(wx.EVT_MENU, _open_dev_log, mi)
+
         self.PopupMenu(menu)
         menu.Destroy()
-
-    def _append_folder_submenu(self, parent_menu: wx.Menu, label: str, copy: bool):
-        """Erstellt ein Untermenü mit allen Postfächern und Ordnern."""
-        sub = wx.Menu()
-        mailboxes = self.controller.get_mailboxes()
-        if not mailboxes:
-            mi = sub.Append(wx.ID_ANY, "–")
-            mi.Enable(False)
-        else:
-            for mb in mailboxes:
-                mb_sub = wx.Menu()
-                folders = self.controller.get_folders(mb["id"])
-                for f in folders:
-                    fd   = dict(f)
-                    lbl  = ("  " * (1 if fd.get("parent_id") else 0)) + fd["name"]
-                    mi   = mb_sub.Append(wx.ID_ANY, lbl)
-                    fid  = fd["id"]
-                    sfid = self._selected_folder_id
-                    smid = self._selected_mail_id
-                    if copy:
-                        self.Bind(wx.EVT_MENU,
-                            lambda e, t=fid, s=sfid, m=smid: self._copy_mail(m, t, s), mi)
-                    else:
-                        self.Bind(wx.EVT_MENU,
-                            lambda e, t=fid, s=sfid, m=smid: self._move_mail(m, t, s), mi)
-                sub.AppendSubMenu(mb_sub, mb["name"])
-        parent_menu.AppendSubMenu(sub, label)
 
     def _copy_mail(self, mail_id: int, target_folder_id: int, source_folder_id: int):
         """Kopiert eine Mail in einen anderen Ordner – inkl. IMAP-Server-Sync."""
@@ -1057,8 +1121,17 @@ class MainFrame(wx.Frame):
             viewer.Show()
 
     def _restore_last_folder(self):
-        """Stellt den zuletzt ausgewählten Ordner wieder her."""
+        """Stellt den zuletzt ausgewählten Ordner und Offline-Zustand wieder her."""
         self._restore_sort_settings()
+
+        # Offline-Zustand aus DB wiederherstellen
+        if self.controller.get_setting("offline_mode", "0") == "1":
+            self._is_offline = True
+            self.mi_offline_work.Check(True)
+            for mi in [self.mi_fetch_all, self.mi_fetch_cur,
+                       self.mi_send_outbox, self.mi_offline_sync]:
+                mi.Enable(False)
+            self.status_bar.SetStatusText(tr("offline_mode_on"), 0)
 
         last_id = self.controller.get_setting("last_folder_id", "")
         if last_id:
@@ -1075,8 +1148,9 @@ class MainFrame(wx.Frame):
                         wx.CallAfter(self._restore_last_mail, f["id"])
                         break
 
-        # Auto-Fetch starten wenn aktiviert
-        wx.CallAfter(self._start_auto_fetch)
+        # Auto-Fetch starten wenn aktiviert und nicht offline
+        if not self._is_offline:
+            wx.CallAfter(self._start_auto_fetch)
 
     def _start_auto_fetch(self):
         """Startet/stoppt Auto-Fetch-Threads nach aktuellen Einstellungen."""
@@ -1094,17 +1168,20 @@ class MainFrame(wx.Frame):
     def _on_auto_fetch_done(self, count: int):
         """
         Wird nach erfolgreichem Auto-Fetch im Haupt-Thread aufgerufen.
-        Stellt sowohl Mail-Fokus (ListCtrl) als auch Ordner-Fokus (TreeCtrl) wieder her.
-        Der Ordnerbaum springt NICHT mehr nach oben zum Postfach-Root.
+
+        FIX: Speichert den aktuell fokussierten Mail-Index VOR dem Neuladen
+        und stellt ihn NACH dem Neuladen wieder her, damit der Fokus nicht
+        verloren geht wenn neue Mails eintreffen.
         """
         self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
-        # reload() merkt intern den selektierten Ordner und stellt ihn still wieder her
         self.folder_panel.reload()
         if self._selected_folder_id:
+            # Fokus sichern
             saved_mail_id = self._selected_mail_id
             mails = self.controller.get_mails(self._selected_folder_id)
             self.mail_list_panel.load_mails(mails)
             self.folder_panel.refresh_folder_unread(self._selected_folder_id)
+            # Fokus wiederherstellen
             if saved_mail_id:
                 wx.CallAfter(self.mail_list_panel.select_mail_by_id, saved_mail_id)
 
