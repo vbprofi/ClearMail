@@ -90,6 +90,7 @@ class AccountDialog(wx.Dialog):
         outer.Add(bs, 0, wx.EXPAND | wx.ALL, 6)
         panel.SetSizer(outer)
         self.btn_ok.Bind(wx.EVT_BUTTON, self._on_save)
+        self.cho_proto.Bind(wx.EVT_CHOICE, self._on_proto_changed)
         self.txt_name.SetFocus()
 
     @staticmethod
@@ -97,6 +98,26 @@ class AccountDialog(wx.Dialog):
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(grid, 1, wx.EXPAND | wx.ALL, 12)
         return s
+
+    def _on_proto_changed(self, event):
+        """
+        Setzt den Eingangs-Port automatisch wenn das Protokoll wechselt:
+          IMAP → 993 (SSL) / 143 (plain)
+          POP3 → 995 (SSL) / 110 (plain)
+        Ändert den Port nur wenn er noch einem bekannten Standard entspricht.
+        """
+        proto    = self.PROTOCOLS[self.cho_proto.GetSelection()]
+        ssl_on   = self.chk_in_ssl.GetValue()
+        cur_port = self.txt_in_port.GetValue()
+        DEFAULTS = {
+            ("IMAP", True):  993,
+            ("IMAP", False): 143,
+            ("POP3", True):  995,
+            ("POP3", False): 110,
+        }
+        if cur_port in set(DEFAULTS.values()):
+            self.txt_in_port.SetValue(DEFAULTS[(proto, ssl_on)])
+        event.Skip()
 
     def _load_account(self, aid):
         acc = self.controller.get_account(aid)

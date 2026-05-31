@@ -63,11 +63,19 @@ class POP3Handler:
                 self._conn = poplib.POP3_SSL(self.host, self.port, context=ctx)
             else:
                 self._conn = poplib.POP3(self.host, self.port)
-                # STLS (STARTTLS für POP3) anbieten
-                caps = self._conn.capa()
-                if b"STLS" in caps or "STLS" in str(caps):
-                    log("info", "POP3 STLS negotiated")
-                self._conn.stls(context=ctx)
+                # STLS (STARTTLS für POP3, RFC 2595) nur wenn Server es ankündigt.
+                # FIX: capa() gibt ein Dict zurück {capability: [params]}, nicht eine Liste.
+                # Außerdem: stls() nur aufrufen wenn STLS wirklich verfügbar ist.
+                try:
+                    caps = self._conn.capa()   # → dict: {"STLS": [], "USER": [], …}
+                    if "STLS" in caps:
+                        log("info", "POP3 STLS negotiated")
+                        self._conn.stls(context=ctx)
+                    else:
+                        log("info", "POP3 STLS not offered by server – plain connection")
+                except poplib.error_proto:
+                    # Manche Server unterstützen CAPA nicht → ignorieren
+                    log("info", "POP3 CAPA not supported – skipping STLS")
 
             self._conn.user(self.username)
             self._conn.pass_(self.password)
@@ -98,43 +106,74 @@ class POP3Handler:
         return count
 
     def get_uidl_list(self) -> Dict[int, str]:
-        """Gibt {msg_num: unique_id} zurück (UIDL-Kommando)."""
-        typ, data, _ = self._conn.uidl()
+        """
+        Gibt {msg_num: unique_id} zurück (UIDL-Kommando, RFC 1939 §7).
+        UIDL identifiziert Mails eindeutig über Sessions hinweg – wird
+        genutzt um bereits heruntergeladene Mails nicht nochmals abzurufen.
+        Mails werden auf dem Server NIEMALS gelöscht (RETR ohne DELE).
+        """
+        try:
+            typ, data, _ = self._conn.uidl()
+        except poplib.error_proto:
+            # Manche Server unterstützen UIDL nicht → Fallback: msg_num als UID
+            log("warning", "POP3 UIDL not supported – using msg numbers as IDs")
+            count, _ = self._conn.stat()
+            return {i: f"msgnum-{i}" for i in range(1, count + 1)}
+
         result = {}
         for line in data:
             if isinstance(line, bytes):
                 line = line.decode("utf-8", errors="replace")
-            parts = line.strip().split()
+            parts = line.strip().split(None, 1)   # maxsplit=1: UID darf Leerzeichen enthalten
             if len(parts) >= 2:
-                result[int(parts[0])] = parts[1]
+                try:
+                    result[int(parts[0])] = parts[1]
+                except ValueError:
+                    pass
         return result
 
     def fetch_mail(self, msg_num: int) -> Optional[Dict]:
-        """Lädt eine Mail als Dict (parsemail)."""
+        """
+        Lädt eine Mail ohne sie vom Server zu löschen (RETR ohne DELE).
+        POP3-Protokoll: RETR lädt, DELE würde löschen – hier KEIN DELE.
+        """
         log("debug", f"POP3 RETR {msg_num}")
         resp, lines, octets = self._conn.retr(msg_num)
         raw = b"\r\n".join(lines)
         return IMAPHandler.parse_email_message(raw, include_attachments=True)
 
-    def fetch_new_mails(self, known_uids: set = None) -> List[Dict]:
-        """Ruft alle unbekannten Mails ab."""
+    def fetch_new_mails(self, known_uids: set = None,
+                        progress_cb=None) -> List[Dict]:
+        """
+        Ruft alle unbekannten Mails vom POP3-Server ab.
+        Mails werden NIE gelöscht (kein DELE) – Kopier-Semantik.
+        known_uids: set von UIDL-IDs die bereits lokal vorhanden sind.
+        progress_cb: optional callback(current, total, subject)
+        """
         known_uids = known_uids or set()
-        uidl = self.get_uidl_list()
+        uidl       = self.get_uidl_list()
+        to_fetch   = [(num, uid) for num, uid in uidl.items()
+                      if uid not in known_uids]
+        total      = len(to_fetch)
+        log("info", f"POP3 fetch: {total} new / {len(uidl)} total on server")
         mails = []
-        for msg_num, uid in uidl.items():
-            if uid in known_uids:
-                continue
+        for i, (msg_num, uid) in enumerate(to_fetch, 1):
             try:
                 m = self.fetch_mail(msg_num)
                 if m:
                     m["uid"] = uid
                     mails.append(m)
-            except Exception:
-                pass
+                    log("debug", f"POP3 fetched msg {msg_num} uid={uid!r} "
+                                 f"subject={str(m.get('subject',''))[:50]!r}")
+                if progress_cb:
+                    progress_cb(i, total, m.get("subject", "") if m else "")
+            except Exception as e:
+                log("error", f"POP3 fetch msg {msg_num}: {e}")
         return mails
 
+    # delete_mail bleibt erhalten für expliziten Aufruf (z.B. Einstellung "nach X Tagen löschen")
     def delete_mail(self, msg_num: int):
-        """Markiert eine Mail zum Löschen (wird bei quit() gelöscht)."""
+        """Markiert eine Mail zum Löschen – wird NUR explizit aufgerufen, NICHT automatisch."""
         self._conn.dele(msg_num)
 
 

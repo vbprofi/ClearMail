@@ -1438,7 +1438,9 @@ class DatabaseManager:
         mb_id = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # Ordnerstruktur je nach Protokoll (wie Thunderbird)
-        if data.get("protocol", "IMAP") == "LOCAL":
+        protocol = data.get("protocol", "IMAP")
+
+        if protocol == "LOCAL":
             # Lokale Ordner: feste Struktur, keine Server-Synchronisierung
             folders = [
                 ("Posteingang", "inbox",   None),
@@ -1453,9 +1455,30 @@ class DatabaseManager:
                     "VALUES (?,NULL,?,?,?,0)",
                     (mb_id, fname, ftype, imap_path)
                 )
-        # IMAP/POP3: KEINE Ordner vorab anlegen.
+
+        elif protocol == "POP3":
+            # POP3: Standardordner sofort anlegen, da kein _sync_imap_folders läuft.
+            # POP3 kennt serverseitig nur einen Posteingang – alle anderen Ordner
+            # werden lokal verwaltet (wie Thunderbird mit POP3).
+            folders = [
+                ("Posteingang", "inbox",   None),
+                ("Gesendet",    "sent",    None),
+                ("Entwürfe",    "drafts",  None),
+                ("Papierkorb",  "trash",   None),
+                ("Spam",        "spam",    None),
+                ("Archiv",      "archive", None),
+            ]
+            for fname, ftype, imap_path in folders:
+                sc.execute(
+                    "INSERT INTO folders (mailbox_id,parent_id,name,folder_type,imap_path,unread) "
+                    "VALUES (?,NULL,?,?,?,0)",
+                    (mb_id, fname, ftype, imap_path)
+                )
+
+        # IMAP: KEINE Ordner vorab anlegen.
         # Ordner werden beim ersten Fetch vom Server abgerufen und
-        # in _sync_imap_folders angelegt (Thunderbird-Verhalten).
+        # in _sync_imap_folders() angelegt (Thunderbird-Verhalten).
+
         sc.commit()
         return account_id
 

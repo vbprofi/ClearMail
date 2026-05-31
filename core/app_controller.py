@@ -635,29 +635,102 @@ class AppController:
         return count
 
     def _fetch_pop3(self, acc: dict, progress_cb=None) -> int:
+        """
+        POP3-Fetch: Kopier-Semantik – Mails werden NUR heruntergeladen,
+        NIE vom Server gelöscht (kein DELE). UIDs werden in der DB
+        gespeichert um bereits bekannte Mails beim nächsten Abruf zu
+        überspringen (identisches Verhalten wie Thunderbird im Kopiermodus).
+        """
         from protocols.pop3_smtp_handler import POP3Handler
+        from core.protocol_runner import log
+        log("info", f"Fetch POP3: account={acc.get('name')} host={acc.get('in_host')}")
+
+        # Sicherstellen dass Standardordner vorhanden sind
+        # (falls Konto vor diesem Fix angelegt wurde, fehlen sie noch)
+        self._ensure_pop3_folders(acc)
+
+        inbox_id = self._get_inbox_folder_id(acc["id"])
+        if not inbox_id:
+            log("error", f"POP3 no inbox folder for account {acc.get('name')!r}")
+            return 0
+
+        known  = self._get_known_uids(inbox_id)
+        log("info", f"POP3 known UIDs in inbox: {len(known)}")
+
         handler = POP3Handler(
             host=acc["in_host"], port=int(acc["in_port"] or 995),
             username=acc["username"] or acc["email"],
             password=acc["password"] or "",
             use_ssl=bool(acc.get("in_ssl", 1)),
         )
-        inbox_id = self._get_inbox_folder_id(acc["id"])
-        if not inbox_id:
-            return 0
-        known = self._get_known_uids(inbox_id)
+
         count = 0
         with handler:
-            if progress_cb:
-                progress_cb("Lade Mails per POP3…")
-            new_mails = handler.fetch_new_mails(known_uids=known)
+            def _prog(current, total, subject=""):
+                if progress_cb:
+                    pct = int(current / max(total, 1) * 100)
+                    progress_cb(
+                        f"POP3 {current}/{total}: {str(subject)[:40]}…",
+                        pct, total
+                    )
+
+            new_mails = handler.fetch_new_mails(known_uids=known,
+                                                progress_cb=_prog)
             for m in new_mails:
-                m["folder_id"] = inbox_id
-                self.db.insert_mail(inbox_id, m)
-                count += 1
+                try:
+                    m["folder_id"] = inbox_id
+                    self.db.insert_mail(inbox_id, m)
+                    log("debug", f"POP3 stored uid={m.get('uid','?')!r} "
+                                 f"subject={str(m.get('subject',''))[:50]!r}")
+                    count += 1
+                except Exception as e:
+                    log("error", f"POP3 insert: {e}")
+
         if count:
             self.db.update_folder_unread(inbox_id)
+        if progress_cb and count == 0:
+            progress_cb("Keine neuen Mails (POP3).", 100, 0)
         return count
+
+    def _ensure_pop3_folders(self, acc: dict):
+        """
+        Legt die Standardordner für ein POP3-Konto an falls sie fehlen.
+        Idempotent – kann mehrfach aufgerufen werden.
+        Nötig für Konten die vor dem Fix angelegt wurden.
+        """
+        sc     = self.db._get_structure_conn()
+        mb_row = sc.execute(
+            "SELECT id FROM mailboxes WHERE account_id=?", (acc["id"],)
+        ).fetchone()
+        if not mb_row:
+            return
+        mb_id = mb_row[0]
+
+        existing_types = {
+            row[0] for row in sc.execute(
+                "SELECT folder_type FROM folders WHERE mailbox_id=?", (mb_id,)
+            ).fetchall()
+        }
+
+        defaults = [
+            ("Posteingang", "inbox"),
+            ("Gesendet",    "sent"),
+            ("Entwürfe",    "drafts"),
+            ("Papierkorb",  "trash"),
+            ("Spam",        "spam"),
+            ("Archiv",      "archive"),
+        ]
+        added = False
+        for fname, ftype in defaults:
+            if ftype not in existing_types:
+                sc.execute(
+                    "INSERT INTO folders (mailbox_id,parent_id,name,folder_type,unread) "
+                    "VALUES (?,NULL,?,?,0)",
+                    (mb_id, fname, ftype)
+                )
+                added = True
+        if added:
+            sc.commit()
 
     def send_outbox(self, progress_cb=None) -> int:
         from protocols.pop3_smtp_handler import SMTPHandler
