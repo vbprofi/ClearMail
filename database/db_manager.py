@@ -21,6 +21,7 @@ DATA_DIR = os.path.join(os.path.expanduser("~"), ".mailclient")
 STORAGE_SQLITE_ONE         = "sqlite_one"
 STORAGE_SQLITE_PER_ACCOUNT = "sqlite_per_account"
 STORAGE_FILES              = "files"
+STORAGE_MBOX               = "mbox"
 
 
 class DatabaseManager:
@@ -828,6 +829,8 @@ class DatabaseManager:
         mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
         if mode == STORAGE_FILES:
             return self._get_mails_from_files(folder_id)
+        if mode == STORAGE_MBOX:
+            return self._get_mails_from_mbox(folder_id)
         conn = self._mail_conn_for_folder(folder_id)
         return list(conn.execute(
             "SELECT * FROM mails WHERE folder_id=? ORDER BY date DESC",
@@ -838,7 +841,6 @@ class DatabaseManager:
         if mode == STORAGE_FILES:
             if folder_id:
                 return self._get_mail_from_file(mail_id, folder_id)
-            # Alle Ordner durchsuchen
             store_dir = os.path.join(self.data_dir, "mailstore")
             if os.path.isdir(store_dir):
                 for entry in os.scandir(store_dir):
@@ -848,6 +850,8 @@ class DatabaseManager:
                             if r: return r
                         except Exception: pass
             return None
+        if mode == STORAGE_MBOX:
+            return self._get_mail_from_mbox(mail_id, folder_id)
         if mode == STORAGE_SQLITE_PER_ACCOUNT:
             if folder_id:
                 conn = self._mail_conn_for_folder(folder_id)
@@ -868,6 +872,9 @@ class DatabaseManager:
         if mode == STORAGE_FILES and folder_id:
             self._update_mail_file_field(mail_id, folder_id, "is_read", val)
             return
+        if mode == STORAGE_MBOX and folder_id:
+            self._update_mbox_field(mail_id, folder_id, "is_read", val)
+            return
         conn = self._mail_conn_for_folder(folder_id) if folder_id else self._get_structure_conn()
         conn.execute("UPDATE mails SET is_read=? WHERE id=?", (val, mail_id))
         conn.commit()
@@ -878,6 +885,9 @@ class DatabaseManager:
         if mode == STORAGE_FILES and folder_id:
             self._update_mail_file_field(mail_id, folder_id, "is_flagged", val)
             return
+        if mode == STORAGE_MBOX and folder_id:
+            self._update_mbox_field(mail_id, folder_id, "is_flagged", val)
+            return
         conn = self._mail_conn_for_folder(folder_id) if folder_id else self._get_structure_conn()
         conn.execute("UPDATE mails SET is_flagged=? WHERE id=?", (val, mail_id))
         conn.commit()
@@ -886,6 +896,9 @@ class DatabaseManager:
         mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
         if mode == STORAGE_FILES and folder_id:
             self._delete_mail_file(mail_id, folder_id)
+            return
+        if mode == STORAGE_MBOX and folder_id:
+            self._delete_mail_mbox(mail_id, folder_id)
             return
         conn = self._mail_conn_for_folder(folder_id) if folder_id else self._get_structure_conn()
         conn.execute("DELETE FROM mails WHERE id=?", (mail_id,))
@@ -896,6 +909,9 @@ class DatabaseManager:
         if mode == STORAGE_FILES:
             self._move_mail_file(mail_id, source_folder_id, target_folder_id)
             return
+        if mode == STORAGE_MBOX:
+            self._move_mail_mbox(mail_id, source_folder_id, target_folder_id)
+            return
         conn = self._mail_conn_for_folder(source_folder_id or target_folder_id)
         conn.execute("UPDATE mails SET folder_id=? WHERE id=?", (target_folder_id, mail_id))
         conn.commit()
@@ -904,6 +920,8 @@ class DatabaseManager:
         mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
         if mode == STORAGE_FILES:
             return self._insert_mail_file(folder_id, data)
+        if mode == STORAGE_MBOX:
+            return self._insert_mail_mbox(folder_id, data)
         conn = self._mail_conn_for_folder(folder_id)
         cur = conn.execute("""
             INSERT INTO mails
@@ -1022,6 +1040,15 @@ class DatabaseManager:
                     try: os.rmdir(store)
                     except OSError: pass
 
+        elif old_mode == STORAGE_MBOX:
+            # .mbox-Dateien und index.db löschen
+            mbox_dir = os.path.join(self.data_dir, "mbox")
+            if os.path.isdir(mbox_dir):
+                try:
+                    shutil.rmtree(mbox_dir)
+                except OSError:
+                    pass
+
     def migrate_storage(self, new_mode: str, progress_cb=None):
         old_mode = self.get_setting("mail_storage", STORAGE_SQLITE_ONE)
         if old_mode == new_mode:
@@ -1075,7 +1102,6 @@ class DatabaseManager:
                             if os.path.exists(eml):
                                 with open(eml, encoding="utf-8", errors="replace") as f:
                                     m["body_text"] = self._parse_eml_body(f.read())
-                            # Sicherstellen: is_read ist Integer
                             m["is_read"]    = int(m.get("is_read", 0))
                             m["is_flagged"] = int(m.get("is_flagged", 0))
                             m["is_answered"]= int(m.get("is_answered", 0))
@@ -1083,6 +1109,25 @@ class DatabaseManager:
                             m["size"]       = int(m.get("size", 0))
                             result.append(m)
                         except Exception: pass
+            return result
+        if mode == STORAGE_MBOX:
+            # Mails aus index.db exportieren (enthält bereits alle Metadaten)
+            result = []
+            try:
+                idx_conn = self._mbox_index_conn()
+                rows = idx_conn.execute("SELECT * FROM mbox_index").fetchall()
+                for row in rows:
+                    m = dict(row)
+                    # Fehlende Integer-Felder normalisieren
+                    m["is_read"]    = int(m.get("is_read", 0))
+                    m["is_flagged"] = int(m.get("is_flagged", 0))
+                    m["has_attach"] = int(m.get("has_attach", 0))
+                    m.setdefault("is_answered", 0)
+                    m.setdefault("bcc", "")
+                    m.setdefault("raw_path", "")
+                    result.append(m)
+            except Exception:
+                pass
             return result
         return []
 
@@ -1121,6 +1166,25 @@ class DatabaseManager:
                 self._write_mail_file(m, store)
                 if progress_cb and i % 5 == 0:
                     progress_cb(35 + int(i/total*55), 100, f"Schreibe Datei {i+1}/{total}…")
+
+        elif mode == STORAGE_MBOX:
+            # Jede Mail über _insert_mail_mbox in die richtige .mbox-Datei schreiben.
+            # Der alte Setting-Wert ist bereits auf STORAGE_MBOX gesetzt (set_setting
+            # wurde vor diesem Aufruf aufgerufen), daher direkt _insert_mail_mbox nutzen.
+            from core.protocol_runner import log
+            done = 0
+            for i, m in enumerate(mails):
+                fid = m.get("folder_id")
+                if not fid:
+                    continue
+                try:
+                    self._insert_mail_mbox(fid, m)
+                    done += 1
+                except Exception as e:
+                    log("warning", f"mbox import mail {i}: {e}")
+                if progress_cb and i % 5 == 0:
+                    progress_cb(35 + int(i/total*55), 100,
+                                f"Schreibe Mbox {done}/{total}…")
 
     def _insert_mail_row(self, conn: sqlite3.Connection, m: dict):
         """Sicheres Einfügen: numerische Felder IMMER als Integer."""
@@ -1161,6 +1225,15 @@ class DatabaseManager:
                     "SELECT COUNT(*) FROM mails WHERE folder_id=? AND is_read=0",
                     (fid,)).fetchone()
                 count = r[0] if r else 0
+            elif mode == STORAGE_MBOX:
+                try:
+                    idx_conn = self._mbox_index_conn()
+                    r = idx_conn.execute(
+                        "SELECT COUNT(*) FROM mbox_index WHERE folder_id=? AND is_read=0",
+                        (fid,)).fetchone()
+                    count = r[0] if r else 0
+                except Exception:
+                    count = 0
             else:
                 r = sc.execute(
                     "SELECT COUNT(*) FROM mails WHERE folder_id=? AND is_read=0",
@@ -1672,6 +1745,316 @@ class DatabaseManager:
         data.pop("created_at", None)
         data["folder_id"] = target_folder_id
         return self.insert_mail(target_folder_id, data)
+
+
+
+    # ================================================================== #
+    #  Mbox-Backend (RFC 4155 / Python mailbox-Modul)                    #
+    # ================================================================== #
+    #
+    # Jeder Ordner = eine .mbox-Datei: {data_dir}/mbox/{folder_id}.mbox
+    # Daneben eine leichtgewichtige SQLite-Index-DB  {data_dir}/mbox/index.db
+    # die die Zuordnung mail_id → (folder_id, mbox_key) speichert und
+    # Felder wie is_read, is_flagged, subject, sender, date enthält.
+    # Die Index-DB wird bei get_mails() aus der Mbox neu aufgebaut wenn
+    # sie fehlt (self-healing).
+    #
+    # Python-Standardbibliothek: mailbox.mbox (RFC 4155)
+    #   - Thread-sicher durch fcntl/LockFile auf Unix/Windows
+    #   - Kein externes Paket nötig
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _mbox_dir(self) -> str:
+        d = os.path.join(self.data_dir, "mbox")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _mbox_path(self, folder_id: int) -> str:
+        return os.path.join(self._mbox_dir, f"{folder_id}.mbox")
+
+    def _mbox_index_conn(self) -> "sqlite3.Connection":
+        """Öffnet (und initialisiert) die Index-DB für den Mbox-Modus."""
+        import sqlite3 as _sq
+        path = os.path.join(self._mbox_dir, "index.db")
+        conn = _sq.connect(path, check_same_thread=False)
+        conn.row_factory = _sq.Row
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mbox_index (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_id  INTEGER NOT NULL,
+                mbox_key   TEXT    NOT NULL,
+                uid        TEXT,
+                subject    TEXT,
+                sender     TEXT,
+                sender_name TEXT,
+                recipients TEXT,
+                cc         TEXT,
+                date       TEXT,
+                body_text  TEXT,
+                body_html  TEXT,
+                has_attach INTEGER DEFAULT 0,
+                is_read    INTEGER DEFAULT 0,
+                is_flagged INTEGER DEFAULT 0,
+                message_id TEXT,
+                size       INTEGER DEFAULT 0,
+                UNIQUE(folder_id, mbox_key)
+            )""")
+        conn.commit()
+        return conn
+
+    def _get_mails_from_mbox(self, folder_id: int) -> list:
+        """
+        Liest alle Mails aus der .mbox-Datei für folder_id.
+        Legt fehlende Einträge im Index an (self-healing).
+        """
+        import mailbox
+        mbox_path = self._mbox_path(folder_id)
+        idx_conn  = self._mbox_index_conn()
+
+        results = []
+        if os.path.exists(mbox_path):
+            try:
+                mb = mailbox.mbox(mbox_path)
+                mb.lock()
+                try:
+                    for key, msg in mb.items():
+                        key_str = str(key)
+                        row = idx_conn.execute(
+                            "SELECT * FROM mbox_index WHERE folder_id=? AND mbox_key=?",
+                            (folder_id, key_str)
+                        ).fetchone()
+                        if row is None:
+                            # Neu im Index aufnehmen
+                            parsed = self._parse_mailbox_message(msg, folder_id)
+                            parsed["mbox_key"] = key_str
+                            idx_conn.execute("""
+                                INSERT OR IGNORE INTO mbox_index
+                                (folder_id,mbox_key,uid,subject,sender,sender_name,
+                                 recipients,cc,date,body_text,body_html,has_attach,
+                                 is_read,is_flagged,message_id,size)
+                                VALUES
+                                (:folder_id,:mbox_key,:uid,:subject,:sender,:sender_name,
+                                 :recipients,:cc,:date,:body_text,:body_html,:has_attach,
+                                 :is_read,:is_flagged,:message_id,:size)
+                            """, parsed)
+                            idx_conn.commit()
+                            row = idx_conn.execute(
+                                "SELECT * FROM mbox_index WHERE folder_id=? AND mbox_key=?",
+                                (folder_id, key_str)
+                            ).fetchone()
+                        if row:
+                            results.append(dict(row))
+                finally:
+                    mb.unlock()
+            except Exception as e:
+                from core.protocol_runner import log
+                log("error", f"mbox get_mails folder={folder_id}: {e}")
+
+        # Nach Datum absteigend sortieren
+        results.sort(key=lambda m: str(m.get("date") or ""), reverse=True)
+        return [_DictRow(r) for r in results]
+
+    def _get_mail_from_mbox(self, mail_id: int, folder_id: int = None) -> "_DictRow | None":
+        """Gibt eine einzelne Mail aus dem Mbox-Index zurück."""
+        idx_conn = self._mbox_index_conn()
+        if folder_id:
+            row = idx_conn.execute(
+                "SELECT * FROM mbox_index WHERE id=? AND folder_id=?",
+                (mail_id, folder_id)
+            ).fetchone()
+        else:
+            row = idx_conn.execute(
+                "SELECT * FROM mbox_index WHERE id=?", (mail_id,)
+            ).fetchone()
+        if not row:
+            return None
+        # Body aus Mbox nachladen wenn nötig
+        d = dict(row)
+        if not d.get("body_text") and not d.get("body_html"):
+            d.update(self._load_body_from_mbox(d["folder_id"], d["mbox_key"]))
+        return _DictRow(d)
+
+    def _insert_mail_mbox(self, folder_id: int, data: dict) -> int:
+        """
+        Schreibt eine neue Mail in die .mbox-Datei und den Index.
+        Gibt die neue mail_id zurück.
+        """
+        import mailbox, email as _email
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text      import MIMEText
+        from email.utils          import formatdate
+
+        # RFC-2822-Nachricht aufbauen
+        body_text = str(data.get("body_text") or "")
+        body_html = str(data.get("body_html") or "")
+
+        if body_html:
+            msg = MIMEMultipart("alternative")
+            msg.attach(MIMEText(body_text, "plain", "utf-8"))
+            msg.attach(MIMEText(body_html, "html",  "utf-8"))
+        else:
+            msg = MIMEText(body_text, "plain", "utf-8")
+
+        msg["From"]    = f"{data.get('sender_name','')} <{data.get('sender','')}>".strip()
+        msg["To"]      = str(data.get("recipients") or "")
+        msg["Subject"] = str(data.get("subject") or "")
+        msg["Date"]    = formatdate(localtime=True)
+        if data.get("message_id"):
+            msg["Message-ID"] = data["message_id"]
+
+        mbox_path = self._mbox_path(folder_id)
+        mb        = mailbox.mbox(mbox_path)
+        mb.lock()
+        try:
+            key = mb.add(msg)
+            mb.flush()
+        finally:
+            mb.unlock()
+
+        key_str  = str(key)
+        idx_conn = self._mbox_index_conn()
+        idx_conn.execute("""
+            INSERT OR REPLACE INTO mbox_index
+            (folder_id,mbox_key,uid,subject,sender,sender_name,
+             recipients,cc,date,body_text,body_html,has_attach,
+             is_read,is_flagged,message_id,size)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            folder_id, key_str,
+            str(data.get("uid") or ""),
+            str(data.get("subject") or ""),
+            str(data.get("sender") or ""),
+            str(data.get("sender_name") or ""),
+            str(data.get("recipients") or ""),
+            str(data.get("cc") or ""),
+            str(data.get("date") or ""),
+            body_text, body_html,
+            int(data.get("has_attach") or 0),
+            int(data.get("is_read")    or 0),
+            int(data.get("is_flagged") or 0),
+            str(data.get("message_id") or ""),
+            int(data.get("size") or len(body_text)),
+        ))
+        idx_conn.commit()
+        mail_id = idx_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        return mail_id
+
+    def _delete_mail_mbox(self, mail_id: int, folder_id: int):
+        """Löscht eine Mail aus der .mbox-Datei und dem Index."""
+        import mailbox
+        idx_conn = self._mbox_index_conn()
+        row = idx_conn.execute(
+            "SELECT mbox_key FROM mbox_index WHERE id=? AND folder_id=?",
+            (mail_id, folder_id)
+        ).fetchone()
+        if not row:
+            return
+        mbox_key = row[0]
+        mbox_path = self._mbox_path(folder_id)
+        if os.path.exists(mbox_path):
+            mb = mailbox.mbox(mbox_path)
+            mb.lock()
+            try:
+                try:
+                    mb.remove(mbox_key)
+                    mb.flush()
+                except (KeyError, Exception):
+                    pass
+            finally:
+                mb.unlock()
+        idx_conn.execute(
+            "DELETE FROM mbox_index WHERE id=?", (mail_id,)
+        )
+        idx_conn.commit()
+
+    def _move_mail_mbox(self, mail_id: int,
+                        source_folder_id: int, target_folder_id: int):
+        """Verschiebt eine Mail zwischen zwei .mbox-Dateien."""
+        import mailbox
+        idx_conn = self._mbox_index_conn()
+        row = idx_conn.execute(
+            "SELECT * FROM mbox_index WHERE id=?", (mail_id,)
+        ).fetchone()
+        if not row:
+            return
+        d = dict(row)
+        src_path  = self._mbox_path(source_folder_id)
+        dst_mb    = mailbox.mbox(self._mbox_path(target_folder_id))
+
+        # Nachricht aus Quell-Mbox lesen
+        raw_msg = None
+        if os.path.exists(src_path):
+            src_mb = mailbox.mbox(src_path)
+            src_mb.lock()
+            try:
+                raw_msg = src_mb.get(d["mbox_key"])
+                if raw_msg:
+                    src_mb.remove(d["mbox_key"])
+                    src_mb.flush()
+            finally:
+                src_mb.unlock()
+
+        if raw_msg:
+            dst_mb.lock()
+            try:
+                new_key = str(dst_mb.add(raw_msg))
+                dst_mb.flush()
+            finally:
+                dst_mb.unlock()
+            idx_conn.execute("""
+                UPDATE mbox_index
+                SET folder_id=?, mbox_key=?
+                WHERE id=?
+            """, (target_folder_id, new_key, mail_id))
+            idx_conn.commit()
+
+    def _update_mbox_field(self, mail_id: int, folder_id: int,
+                           field: str, value):
+        """Aktualisiert ein Metadaten-Feld im Mbox-Index."""
+        if field not in ("is_read", "is_flagged"):
+            return
+        idx_conn = self._mbox_index_conn()
+        idx_conn.execute(
+            f"UPDATE mbox_index SET {field}=? WHERE id=? AND folder_id=?",
+            (value, mail_id, folder_id)
+        )
+        idx_conn.commit()
+
+    def _load_body_from_mbox(self, folder_id: int, mbox_key: str) -> dict:
+        """Lädt Body-Text/HTML direkt aus der .mbox-Datei."""
+        import mailbox
+        mbox_path = self._mbox_path(folder_id)
+        if not os.path.exists(mbox_path):
+            return {}
+        mb = mailbox.mbox(mbox_path)
+        try:
+            msg = mb.get(mbox_key)
+            if msg is None:
+                return {}
+            return self._parse_mailbox_message(msg, folder_id)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _parse_mailbox_message(msg, folder_id: int) -> dict:
+        """
+        Parst ein mailbox.mboxMessage in ein Mail-Dict.
+        Nutzt IMAPHandler.parse_email_message für konsistentes Parsing.
+        """
+        from protocols.imap_handler import IMAPHandler
+        raw = msg.as_bytes() if hasattr(msg, "as_bytes") else bytes(str(msg), "utf-8")
+        d = IMAPHandler.parse_email_message(raw, include_attachments=False)
+        d["folder_id"] = folder_id
+        # is_read: Status-Flag 'R' in mbox (RFC 4155)
+        status = str(getattr(msg, "_from", "") or "")
+        flags  = str(msg.get("Status", "") or "")
+        d["is_read"]    = int("R" in flags or "O" in flags)
+        d["is_flagged"] = int("F" in str(msg.get("X-Status", "") or ""))
+        d.setdefault("uid", "")
+        d.setdefault("mbox_key", "")
+        return d
+
 
 
 class _DictRow(dict):

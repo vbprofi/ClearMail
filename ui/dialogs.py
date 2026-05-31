@@ -166,6 +166,7 @@ class AccountDialog(wx.Dialog):
 STORAGE_SQLITE_ONE         = "sqlite_one"
 STORAGE_SQLITE_PER_ACCOUNT = "sqlite_per_account"
 STORAGE_FILES              = "files"
+STORAGE_MBOX               = "mbox"
 
 
 class SettingsDialog(wx.Dialog):
@@ -310,11 +311,12 @@ class SettingsDialog(wx.Dialog):
 
         # Label zuerst, dann Choice (HWND-Reihenfolge für Screenreader)
         lbl_storage = wx.StaticText(pg4, label=tr("settings_storage_mode"))
-        self._storage_codes  = [STORAGE_SQLITE_ONE, STORAGE_SQLITE_PER_ACCOUNT, STORAGE_FILES]
+        self._storage_codes  = [STORAGE_SQLITE_ONE, STORAGE_SQLITE_PER_ACCOUNT, STORAGE_FILES, STORAGE_MBOX]
         self._storage_labels = [
             tr("settings_storage_sqlite_one"),
             tr("settings_storage_sqlite_per_account"),
             tr("settings_storage_files"),
+            tr("settings_storage_mbox"),
         ]
         self.cho_storage = wx.Choice(pg4, choices=self._storage_labels)
         self.cho_storage.SetName(tr("settings_storage_mode"))
@@ -765,120 +767,352 @@ class AboutDialog(wx.Dialog):
 # ================================================================== #
 
 class ComposeDialog(wx.Dialog):
+    """
+    Verfassen / Antworten / Weiterleiten.
 
-    def __init__(self, parent, controller, reply_to=None, reply_all=False, forward=None):
-        title = tr("compose_title_reply") if reply_to else (
-                tr("compose_title_forward") if forward else tr("compose_title_new"))
-        super().__init__(parent, title=title, size=(660, 600),
+    v4-Erweiterungen:
+      - HTML/Text-Schalter: wx.Notebook Body (Text | HTML)
+        Standard: abhängig von Einstellung render_html
+      - Anhang-Kontextmenü: Speichern, Entfernen, Hinzufügen
+      - Vollständige HTML-Mail-Erstellung via MIMEMultipart/alternative
+      - Vorwärts-Anhänge werden korrekt mitgenommen
+      - Antwort-HTML-Zitat wenn Quell-Mail HTML hatte
+    """
+
+    def __init__(self, parent, controller,
+                 reply_to=None, reply_all=False, forward=None):
+        title = (tr("compose_title_reply")   if reply_to else
+                 tr("compose_title_forward") if forward  else
+                 tr("compose_title_new"))
+        super().__init__(parent, title=title, size=(720, 660),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
-        self.controller    = controller
-        self._attachments  = []   # Liste von Dateipfaden
-        self._accs         = [dict(a) for a in self.controller.get_accounts()
-                              if dict(a).get("protocol", "IMAP") != "LOCAL"]
+        self.controller   = controller
+        self._attachments = []   # [{name, path, data(bytes|None), mime_type, size}]
+        self._accs        = [dict(a) for a in controller.get_accounts()
+                             if dict(a).get("protocol", "IMAP") != "LOCAL"]
+        # HTML-Modus: Standard aus Einstellungen
+        self._html_mode   = controller.get_setting("render_html", "0") == "1"
         self._build_ui()
         self._prefill(reply_to, reply_all, forward)
         self.Centre()
 
+    # ------------------------------------------------------------------ #
+    #  UI                                                                 #
+    # ------------------------------------------------------------------ #
+
     def _build_ui(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        gs    = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
-        gs.AddGrowableCol(1)
 
+        # ---- Header ----
+        gs = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
+        gs.AddGrowableCol(1)
         from_choices = [f"{a['name']} <{a['email']}>" for a in self._accs] or ["(–)"]
         self.cho_from    = add_labeled_field(panel, gs, tr("compose_from"),
                                               lambda p: wx.Choice(p, choices=from_choices))
         self.cho_from.SetSelection(0)
-        self.txt_to      = add_labeled_field(panel, gs, tr("compose_to"),      lambda p: wx.TextCtrl(p))
-        self.txt_cc      = add_labeled_field(panel, gs, tr("compose_cc"),      lambda p: wx.TextCtrl(p))
-        self.txt_subject = add_labeled_field(panel, gs, tr("compose_subject"), lambda p: wx.TextCtrl(p))
+        self.txt_to      = add_labeled_field(panel, gs, tr("compose_to"),
+                                              lambda p: wx.TextCtrl(p))
+        self.txt_cc      = add_labeled_field(panel, gs, tr("compose_cc"),
+                                              lambda p: wx.TextCtrl(p))
+        self.txt_subject = add_labeled_field(panel, gs, tr("compose_subject"),
+                                              lambda p: wx.TextCtrl(p))
         sizer.Add(gs, 0, wx.EXPAND | wx.ALL, 8)
         sizer.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
-        sizer.Add(wx.StaticText(panel, label=tr("compose_body")), 0, wx.LEFT | wx.TOP, 8)
-        self.txt_body = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.BORDER_SUNKEN)
+
+        # ---- HTML/Text-Schalter ----
+        row_mode = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_toggle_html = wx.Button(panel, label=self._toggle_label())
+        self.btn_toggle_html.SetName(tr("compose_toggle_html"))
+        row_mode.Add(self.btn_toggle_html, 0, wx.ALL, 4)
+        sizer.Add(row_mode, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
+
+        # ---- Body: Notebook (Text | HTML) ----
+        self._nb_body = wx.Notebook(panel)
+
+        # Seite 0: Plaintext
+        pg_text = wx.Panel(self._nb_body)
+        self.txt_body = wx.TextCtrl(
+            pg_text, style=wx.TE_MULTILINE | wx.BORDER_SUNKEN)
         self.txt_body.SetName(tr("compose_body"))
-        self.txt_body.SetMinSize((-1, 160))
-        sizer.Add(self.txt_body, 1, wx.EXPAND | wx.ALL, 8)
+        pg_text_s = wx.BoxSizer(wx.VERTICAL)
+        pg_text_s.Add(self.txt_body, 1, wx.EXPAND | wx.ALL, 4)
+        pg_text.SetSizer(pg_text_s)
+        self._nb_body.AddPage(pg_text, tr("compose_tab_text"))
+
+        # Seite 1: HTML-Editor (wx.html2.WebView wenn verfügbar, sonst TextCtrl)
+        pg_html = wx.Panel(self._nb_body)
+        self._html_editor, self._html_backend = self._create_html_editor(pg_html)
+        self._html_editor.SetName(tr("compose_tab_html"))
+        pg_html_s = wx.BoxSizer(wx.VERTICAL)
+        pg_html_s.Add(self._html_editor, 1, wx.EXPAND | wx.ALL, 4)
+        pg_html.SetSizer(pg_html_s)
+        self._nb_body.AddPage(pg_html, tr("compose_tab_html"))
+
+        # Initial-Seite
+        self._nb_body.SetSelection(1 if self._html_mode else 0)
+        sizer.Add(self._nb_body, 1, wx.EXPAND | wx.ALL, 8)
 
         # ---- Anhang-Bereich ----
         self.lbl_attach = wx.StaticText(panel, label=tr("compose_attach_empty"))
         sizer.Add(self.lbl_attach, 0, wx.LEFT | wx.RIGHT, 8)
         self.list_attach = wx.ListCtrl(
             panel, style=wx.LC_REPORT | wx.BORDER_SUNKEN | wx.LC_SINGLE_SEL)
-        self.list_attach.SetName("Anhang-Liste")
-        self.list_attach.InsertColumn(0, "Dateiname", width=280)
-        self.list_attach.InsertColumn(1, "Größe",     width=80)
+        self.list_attach.SetName(tr("compose_attach_label"))
+        self.list_attach.InsertColumn(0, tr("compose_attach_col_name"), width=300)
+        self.list_attach.InsertColumn(1, tr("compose_attach_col_size"), width=80)
         self.list_attach.SetMinSize((-1, 80))
         sizer.Add(self.list_attach, 0, wx.EXPAND | wx.ALL, 8)
 
+        # ---- Buttons ----
         row = wx.BoxSizer(wx.HORIZONTAL)
         btn_send   = wx.Button(panel, label=tr("compose_send"))
         btn_attach = wx.Button(panel, label=tr("compose_attach"))
-        btn_remove = wx.Button(panel, label=tr("compose_attach_remove"))
         btn_disc   = wx.Button(panel, wx.ID_CANCEL, tr("compose_discard"))
-        btn_send.Bind(wx.EVT_BUTTON,   self._on_send)
-        btn_attach.Bind(wx.EVT_BUTTON, self._on_attach)
-        btn_remove.Bind(wx.EVT_BUTTON, self._on_remove_attach)
-        row.Add(btn_send, 0, wx.RIGHT, 8)
-        row.Add(btn_attach, 0, wx.RIGHT, 4)
-        row.Add(btn_remove, 0, wx.RIGHT, 8)
+        btn_send.SetDefault()
+        row.Add(btn_send,   0, wx.RIGHT, 8)
+        row.Add(btn_attach, 0, wx.RIGHT, 8)
         row.AddStretchSpacer()
         row.Add(btn_disc)
         sizer.Add(row, 0, wx.EXPAND | wx.ALL, 8)
         panel.SetSizer(sizer)
+
+        # ---- Events ----
+        btn_send.Bind(wx.EVT_BUTTON,   self._on_send)
+        btn_attach.Bind(wx.EVT_BUTTON, self._on_add_attach)
+        self.btn_toggle_html.Bind(wx.EVT_BUTTON, self._on_toggle_html)
+        self.list_attach.Bind(wx.EVT_CONTEXT_MENU, self._on_attach_ctx)
+        self.list_attach.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_attach_open)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+
         self.txt_to.SetFocus()
+
+    def _create_html_editor(self, parent):
+        """Erstellt HTML-Editor: WebView (editable) wenn verfügbar, sonst TextCtrl."""
+        try:
+            import wx.html2
+            wv = wx.html2.WebView.New(parent)
+            # Leeres editierbares Dokument laden
+            wv.SetPage(
+                '<html><body contenteditable="true" style="font-family:sans-serif;'
+                'font-size:10pt;padding:6px;outline:none;"></body></html>', "")
+            return wv, "webview"
+        except Exception:
+            tc = wx.TextCtrl(parent, style=wx.TE_MULTILINE | wx.BORDER_SUNKEN)
+            return tc, "textctrl"
+
+    def _toggle_label(self):
+        return ("🌐 " + tr("compose_switch_to_html")
+                if not self._html_mode
+                else "📄 " + tr("compose_switch_to_text"))
+
+    # ------------------------------------------------------------------ #
+    #  Daten vorbelegen                                                   #
+    # ------------------------------------------------------------------ #
 
     def _prefill(self, reply_to, reply_all, forward):
         re_prefix  = tr("compose_re_prefix")
         fwd_prefix = tr("compose_fwd_prefix")
+
         if reply_to:
             self.txt_to.SetValue(str(reply_to.get("sender") or ""))
             if reply_all:
-                self.txt_cc.SetValue(str(reply_to.get("recipients") or ""))
+                existing = str(reply_to.get("recipients") or "")
+                self.txt_cc.SetValue(existing)
             subj = str(reply_to.get("subject") or "")
-            self.txt_subject.SetValue(subj if subj.startswith(re_prefix) else re_prefix + subj)
-            self.txt_body.SetValue(
-                f"\n\n──────────────────\n"
-                f"{tr('preview_from')} {reply_to.get('sender_name','')} <{reply_to.get('sender','')}>\n"
-                f"{reply_to.get('body_text','') or ''}")
-            self.txt_body.SetInsertionPoint(0)
+            self.txt_subject.SetValue(
+                subj if subj.startswith(re_prefix) else re_prefix + subj)
+            # Zitat – HTML wenn Quell-Mail HTML hatte und HTML-Modus aktiv
+            src_html = str(reply_to.get("body_html") or "")
+            src_text = str(reply_to.get("body_text") or "")
+            quote_html = (
+                f'<br><br><hr style="border:1px solid #ccc">'
+                f'<b>{tr("preview_from")}</b> '
+                f'{reply_to.get("sender_name","")} &lt;{reply_to.get("sender","")}&gt;<br>'
+                f'<blockquote style="border-left:3px solid #888;margin:0 0 0 6px;padding-left:8px;">'
+                f'{src_html or src_text.replace(chr(10),"<br>")}</blockquote>'
+            )
+            quote_text = (
+                f'\n\n{"─"*40}\n'
+                f'{tr("preview_from")} {reply_to.get("sender_name","")} '
+                f'<{reply_to.get("sender","")}>\n'
+                + "\n".join(f"> {l}" for l in src_text.splitlines())
+            )
+            self._set_body_content("", quote_html, quote_text)
+
         elif forward:
             subj = str(forward.get("subject") or "")
-            self.txt_subject.SetValue(subj if subj.startswith(fwd_prefix) else fwd_prefix + subj)
-            self.txt_body.SetValue(
-                f"\n\n──────────────────\n"
-                f"{tr('preview_from')} {forward.get('sender_name','')} <{forward.get('sender','')}>\n"
-                f"{forward.get('body_text','') or ''}")
+            self.txt_subject.SetValue(
+                subj if subj.startswith(fwd_prefix) else fwd_prefix + subj)
+            src_html = str(forward.get("body_html") or "")
+            src_text = str(forward.get("body_text") or "")
+            fwd_html = (
+                f'<br><br><hr style="border:1px solid #ccc">'
+                f'<b>{"Weitergeleitete Nachricht"}</b><br>'
+                f'<b>{tr("preview_from")}</b> '
+                f'{forward.get("sender_name","")} &lt;{forward.get("sender","")}&gt;<br>'
+                f'<b>{tr("preview_subject")}</b> {forward.get("subject","")}<br><br>'
+                f'{src_html or src_text.replace(chr(10),"<br>")}'
+            )
+            fwd_text = (
+                f'\n\n{"─"*40}\n'
+                f'{tr("preview_from")} {forward.get("sender_name","")} '
+                f'<{forward.get("sender","")}>\n'
+                f'{tr("preview_subject")} {forward.get("subject","")}\n\n'
+                f'{src_text}'
+            )
+            self._set_body_content("", fwd_html, fwd_text)
+            # Anhänge der Original-Mail mitnehmen
+            for att in (forward.get("attachments") or []):
+                if att.get("data"):
+                    self._attachments.append({
+                        "name":      att.get("filename", "attachment"),
+                        "path":      None,
+                        "data":      bytes(att["data"]),
+                        "mime_type": att.get("mime_type", "application/octet-stream"),
+                        "size":      att.get("size", 0),
+                    })
+            self._refresh_attach_list()
 
-    def _on_attach(self, event):
+    def _set_body_content(self, text_prefix: str, html_content: str, text_content: str):
+        """Setzt Inhalt in beiden Body-Editoren."""
+        # Plaintext
+        self.txt_body.SetValue(text_content)
+        self.txt_body.SetInsertionPoint(0)
+        # HTML-Editor
+        if self._html_backend == "webview":
+            import wx
+            wx.CallAfter(self._html_editor.SetPage,
+                f'<html><body contenteditable="true" style="font-family:sans-serif;'
+                f'font-size:10pt;padding:6px;outline:none;">'
+                f'{html_content}</body></html>', "")
+        else:
+            self._html_editor.SetValue(html_content)
+
+    def _get_body_content(self) -> tuple[str, str]:
+        """Gibt (body_text, body_html) zurück je nach aktivem Modus."""
+        if self._html_mode:
+            if self._html_backend == "webview":
+                try:
+                    html = self._html_editor.GetPageSource()
+                except Exception:
+                    html = ""
+            else:
+                html = self._html_editor.GetValue()
+            # Aus HTML Plaintext ableiten
+            from ui.html_renderer import html_to_text
+            text = html_to_text(html)
+            return text, html
+        else:
+            text = self.txt_body.GetValue()
+            return text, ""
+
+    # ------------------------------------------------------------------ #
+    #  HTML/Text umschalten                                               #
+    # ------------------------------------------------------------------ #
+
+    def _on_toggle_html(self, event):
+        self._html_mode = not self._html_mode
+        self._nb_body.SetSelection(1 if self._html_mode else 0)
+        self.btn_toggle_html.SetLabel(self._toggle_label())
+
+    # ------------------------------------------------------------------ #
+    #  Anhänge – Kontextmenü                                             #
+    # ------------------------------------------------------------------ #
+
+    def _on_attach_ctx(self, event):
+        menu = wx.Menu()
+        mi_add    = menu.Append(wx.ID_ANY, tr("compose_attach_ctx_add"))
+        mi_save   = menu.Append(wx.ID_ANY, tr("compose_attach_ctx_save"))
+        mi_remove = menu.Append(wx.ID_ANY, tr("compose_attach_ctx_remove"))
+        self.Bind(wx.EVT_MENU, self._on_add_attach,    mi_add)
+        self.Bind(wx.EVT_MENU, self._on_save_attach,   mi_save)
+        self.Bind(wx.EVT_MENU, self._on_remove_attach, mi_remove)
+        idx = self.list_attach.GetFirstSelected()
+        mi_save.Enable(idx >= 0)
+        mi_remove.Enable(idx >= 0)
+        self.list_attach.PopupMenu(menu)
+        menu.Destroy()
+
+    def _on_add_attach(self, event=None):
         with wx.FileDialog(self, tr("attach_title"),
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE) as d:
             if d.ShowModal() != wx.ID_OK:
                 return
+            import os
             for path in d.GetPaths():
-                if path not in self._attachments:
-                    self._attachments.append(path)
+                if not any(a.get("path") == path for a in self._attachments):
+                    size = os.path.getsize(path) if os.path.exists(path) else 0
+                    self._attachments.append({
+                        "name":      os.path.basename(path),
+                        "path":      path,
+                        "data":      None,   # lazy – aus Pfad beim Senden laden
+                        "mime_type": "application/octet-stream",
+                        "size":      size,
+                    })
         self._refresh_attach_list()
 
-    def _on_remove_attach(self, event):
+    def _on_save_attach(self, event=None):
+        idx = self.list_attach.GetFirstSelected()
+        if idx < 0 or idx >= len(self._attachments):
+            return
+        att = self._attachments[idx]
+        import os
+        with wx.FileDialog(self, tr("attach_title"),
+                           defaultFile=att["name"],
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as d:
+            if d.ShowModal() != wx.ID_OK:
+                return
+            data = att.get("data")
+            if data is None and att.get("path") and os.path.exists(att["path"]):
+                with open(att["path"], "rb") as f:
+                    data = f.read()
+            if data:
+                with open(d.GetPath(), "wb") as f:
+                    f.write(data)
+
+    def _on_remove_attach(self, event=None):
         idx = self.list_attach.GetFirstSelected()
         if 0 <= idx < len(self._attachments):
             del self._attachments[idx]
             self._refresh_attach_list()
 
+    def _on_attach_open(self, event=None):
+        idx = self.list_attach.GetFirstSelected()
+        if idx < 0 or idx >= len(self._attachments):
+            return
+        att = self._attachments[idx]
+        import os, sys, tempfile, subprocess
+        path = att.get("path")
+        if not path and att.get("data"):
+            path = os.path.join(tempfile.gettempdir(), att["name"])
+            with open(path, "wb") as f:
+                f.write(att["data"])
+        if path and os.path.exists(path):
+            try:
+                if sys.platform == "win32":
+                    os.startfile(path)
+                else:
+                    subprocess.Popen(["xdg-open", path])
+            except Exception as e:
+                wx.MessageBox(str(e), tr("error_title"), wx.OK | wx.ICON_ERROR, self)
+
     def _refresh_attach_list(self):
         self.list_attach.DeleteAllItems()
-        import os
-        for path in self._attachments:
-            size = os.path.getsize(path) if os.path.exists(path) else 0
-            sz   = (f"{size//1024} KB" if size >= 1024 else f"{size} B")
+        for att in self._attachments:
+            size = att.get("size") or 0
+            sz   = (f"{size//1024} KB" if size >= 1024 else f"{size} B") if size else "?"
             idx  = self.list_attach.InsertItem(
-                self.list_attach.GetItemCount(), os.path.basename(path))
+                self.list_attach.GetItemCount(), att["name"])
             self.list_attach.SetItem(idx, 1, sz)
         count = len(self._attachments)
         self.lbl_attach.SetLabel(
             tr("compose_attach_list", count=count) if count
             else tr("compose_attach_empty"))
+
+    # ------------------------------------------------------------------ #
+    #  Senden                                                             #
+    # ------------------------------------------------------------------ #
 
     def _on_send(self, event):
         to_str = self.txt_to.GetValue().strip()
@@ -886,33 +1120,44 @@ class ComposeDialog(wx.Dialog):
             wx.MessageBox(tr("compose_err_no_to"), tr("error_title"),
                           wx.OK | wx.ICON_WARNING, self)
             return
-
         if not self._accs:
             wx.MessageBox(tr("imap_no_account"), tr("hint_title"),
                           wx.OK | wx.ICON_INFORMATION, self)
             return
 
-        idx  = self.cho_from.GetSelection()
-        acc  = self._accs[idx] if 0 <= idx < len(self._accs) else self._accs[0]
+        idx = self.cho_from.GetSelection()
+        acc = self._accs[idx] if 0 <= idx < len(self._accs) else self._accs[0]
 
-        # Mail zuerst im Postausgang (Lokale Ordner) speichern
-        outbox_id = self.controller._get_outbox_folder_id()
+        body_text, body_html = self._get_body_content()
+
+        # Anhang-Pfade für SMTPHandler (nur Pfade, keine Bytes)
+        import os, tempfile
+        attach_paths = []
+        for att in self._attachments:
+            if att.get("path") and os.path.exists(att["path"]):
+                attach_paths.append(att["path"])
+            elif att.get("data"):
+                # Temp-Datei für Bytes-Anhänge (Weiterleitungs-Anhänge)
+                tmp = os.path.join(tempfile.gettempdir(), att["name"])
+                with open(tmp, "wb") as f:
+                    f.write(att["data"])
+                attach_paths.append(tmp)
+
         from datetime import datetime as _dt
         mail_data = {
-            "subject":    self.txt_subject.GetValue().strip(),
-            "sender":     acc["email"],
-            "sender_name":acc["name"],
-            "recipients": to_str,
-            "cc":         self.txt_cc.GetValue().strip(),
-            "date":       _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "body_text":  self.txt_body.GetValue(),
-            "body_html":  "",
-            "is_read":    1,
-            "has_attach": int(bool(self._attachments)),
-            "size":       len(self.txt_body.GetValue()),
+            "subject":     self.txt_subject.GetValue().strip(),
+            "sender":      acc["email"],
+            "sender_name": acc["name"],
+            "recipients":  to_str,
+            "cc":          self.txt_cc.GetValue().strip(),
+            "date":        _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "body_text":   body_text,
+            "body_html":   body_html,
+            "is_read":     1,
+            "has_attach":  int(bool(self._attachments)),
+            "size":        len(body_text) + len(body_html),
         }
 
-        # Sofort senden versuchen
         try:
             from protocols.pop3_smtp_handler import SMTPHandler
             to_list = [a.strip() for a in to_str.split(",") if a.strip()]
@@ -923,32 +1168,59 @@ class ComposeDialog(wx.Dialog):
                 password=acc.get("password") or "",
                 use_ssl=bool(acc.get("out_ssl", 1)),
             )
-            smtp.send(
+            raw_bytes = smtp.send(
                 from_addr=acc["email"],
                 to_addrs=to_list,
                 subject=mail_data["subject"],
-                body_text=mail_data["body_text"],
+                body_text=body_text,
+                body_html=body_html,
                 cc=cc_list,
-                attachments=self._attachments,
+                attachments=attach_paths,
             )
-            # Gesendet-Ordner
+            # In Gesendet-Ordner speichern
             sent_id = self.controller._get_sent_folder_id(acc["id"])
             if sent_id:
                 self.controller.db.insert_mail(sent_id, mail_data)
+            # IMAP: als gelesene Mail in Gesendet-Ordner hochladen
+            if acc.get("protocol", "IMAP").upper() == "IMAP" and acc.get("in_host"):
+                import threading
+                from core.app_controller import _make_imap
+                def _append(acc=acc, raw=raw_bytes):
+                    try:
+                        with _make_imap(acc) as imap:
+                            folders = imap.list_folders()
+                            for fo in folders:
+                                if self.controller._guess_folder_type(
+                                        fo["name"]) == "sent":
+                                    imap.append_mail(fo["path"], raw, "\\Seen")
+                                    break
+                    except Exception:
+                        pass
+                threading.Thread(target=_append, daemon=True).start()
             wx.MessageBox(tr("compose_send_ok"), tr("hint_title"),
                           wx.OK | wx.ICON_INFORMATION, self)
             self.EndModal(wx.ID_OK)
 
         except RuntimeError as e:
-            # Senden fehlgeschlagen → in Postausgang ablegen
+            outbox_id = self.controller._get_outbox_folder_id()
             if outbox_id:
                 self.controller.db.insert_mail(outbox_id, mail_data)
                 wx.MessageBox(
-                    tr("compose_send_err", error=str(e)) + "\n\n" + tr("compose_saved_outbox"),
+                    tr("compose_send_err", error=str(e)) + "\n\n" +
+                    tr("compose_saved_outbox"),
                     tr("error_title"), wx.OK | wx.ICON_WARNING, self)
             else:
                 wx.MessageBox(tr("compose_send_err", error=str(e)),
                               tr("error_title"), wx.OK | wx.ICON_ERROR, self)
+
+    def _on_key(self, event: wx.KeyEvent):
+        if event.GetKeyCode() == wx.WXK_ESCAPE:
+            if wx.MessageBox(tr("compose_discard_confirm"),
+                             tr("compose_title_new"),
+                             wx.YES_NO | wx.NO_DEFAULT, self) == wx.YES:
+                self.EndModal(wx.ID_CANCEL)
+            return
+        event.Skip()
 
 
 # ================================================================== #
