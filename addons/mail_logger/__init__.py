@@ -1,5 +1,5 @@
 """
-Addon: MailLogger  v3.0
+Addon: MailLogger  v1.1
 Protokolliert Mail-Events in eine Logdatei.
 
 Einstellungen (via get_settings_panel):
@@ -18,7 +18,7 @@ from core.i18n import tr
 class Addon(AddonBase):
 
     NAME    = "MailLogger"
-    VERSION = "3.0.0"
+    VERSION = "1.1.0"
 
     MAX_LOG_BYTES = 2 * 1024 * 1024
     MAX_BACKUPS   = 3

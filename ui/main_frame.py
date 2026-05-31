@@ -1071,31 +1071,34 @@ class MainFrame(wx.Frame):
                 mi = menu.Append(wx.ID_ANY, lbl)
                 self.Bind(wx.EVT_MENU, fn, mi)
 
-        # Addon-Einträge (Adressbuch, MailLogger)
+        # Addon-Einträge: jedes Addon mit seinem eigenen Label anzeigen.
+        # Adressbuch bekommt einen festen lokalisierten Eintragsnamen (ctx_addrbook),
+        # alle anderen Addons nutzen ihr eigenes label aus get_menu_items().
         addon_items = self.controller.addon_mgr.get_all_menu_items()
-        # Adressbuch-Eintrag immer anzeigen
-        addr_items = [x for x in addon_items if "adress" in x.get("label","").lower()
-                      or "address" in x.get("label","").lower()
-                      or "adressbuch" in x.get("label","").lower()]
-        log_items  = [x for x in addon_items if x not in addr_items]
 
-        if addr_items or log_items:
+        # Entwickler-LOG-Einträge filtern (werden separat unten angehängt)
+        dev_log_path = self.controller.get_setting(
+            "dev_log_path",
+            os.path.join(os.path.expanduser("~"), ".mailclient", "protocol.log")
+        )
+
+        if addon_items:
             menu.AppendSeparator()
-        for entry in addr_items:
-            mi = menu.Append(wx.ID_ANY, tr("ctx_addrbook"))
-            self.Bind(wx.EVT_MENU,
-                      lambda e, h=entry["handler"]: h(self._selected_mail_id), mi)
-        for entry in log_items:
-            mi = menu.Append(wx.ID_ANY, tr("ctx_log_mail"))
+        for entry in addon_items:
+            raw_label = entry.get("label", "")
+            # Adressbuch: lokalisiertes Label nutzen
+            if ("adress" in raw_label.lower() or "address" in raw_label.lower()
+                    or "adressbuch" in raw_label.lower()):
+                label = tr("ctx_addrbook")
+            else:
+                # Alle anderen Addons: eigenes Label aus get_menu_items()
+                label = raw_label
+            mi = menu.Append(wx.ID_ANY, label)
             self.Bind(wx.EVT_MENU,
                       lambda e, h=entry["handler"]: h(self._selected_mail_id), mi)
 
         # Entwickler-LOG nur wenn Entwicklermodus aktiv
         if dev_mode:
-            dev_log_path = self.controller.get_setting(
-                "dev_log_path",
-                os.path.join(os.path.expanduser("~"), ".mailclient", "protocol.log")
-            )
             def _open_dev_log(e, p=dev_log_path):
                 if os.path.exists(p):
                     try:

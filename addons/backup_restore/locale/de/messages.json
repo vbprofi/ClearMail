@@ -1,0 +1,41 @@
+{
+  "lang_name": "Deutsch",
+  "br_description": "Backups auflisten, wiederherstellen und ins aktuelle Speicherformat konvertieren.",
+  "br_menu_open":   "Backup wiederherstellen…",
+
+  "br_dlg_title":        "Backup-Verwaltung",
+  "br_section_list":     "Erkannte Backups:",
+  "br_col_date":         "Erstellt am",
+  "br_col_type":         "Speicherformat",
+  "br_col_mails":        "Mails",
+  "br_col_size":         "Größe",
+  "br_col_path":         "Pfad",
+
+  "br_btn_restore":      "Backup einspielen",
+  "br_btn_browse":       "Ordner wählen…",
+  "br_btn_refresh":      "Aktualisieren",
+
+  "br_type_sqlite_one":         "SQLite (eine DB)",
+  "br_type_sqlite_per_account": "SQLite (pro Konto)",
+  "br_type_files":              "Dateien",
+  "br_type_mbox":               "Mbox",
+  "br_type_unknown":            "Unbekannt",
+
+  "br_confirm_title":   "Backup einspielen",
+  "br_confirm_msg":     "Soll das Backup vom {date} wirklich eingespielt werden?\n\nFormat: {format}\n\nAktuelle Daten werden vorher gesichert, dann überschrieben.\nDie Anwendung wird danach neu gestartet.\n\nFortfahren?",
+
+  "br_no_backup_selected":  "Bitte zuerst ein Backup aus der Liste oder per Ordnerauswahl wählen.",
+  "br_backup_not_valid":    "Der gewählte Ordner enthält kein erkennbares Backup.",
+  "br_backup_ok":           "Backup vom {date} wurde erfolgreich eingespielt.",
+  "br_error_restore":       "Fehler beim Einspielen:\n{error}",
+  "br_progress_backup_current": "Sichere aktuelle Daten…",
+  "br_progress_restore":    "Stelle Backup wieder her…",
+  "br_progress_convert":    "Konvertiere ins aktuelle Format ({mode})…",
+  "br_progress_done":       "Abgeschlossen. Anwendung wird neu gestartet…",
+  "br_no_backups_found":    "Keine Backups im Backup-Ordner gefunden.",
+  "br_hint_select":         "Wähle ein Backup aus der Liste oder klicke auf 'Ordner wählen…'.",
+
+  "br_size_b":   "{n} B",
+  "br_size_kb":  "{n} KB",
+  "br_size_mb":  "{n} MB"
+}

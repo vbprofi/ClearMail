@@ -7,6 +7,7 @@ ui/__pycache__/*
 addons/folder_order/__pycache__/*
 addons/mail_logger/__pycache__/*
 addons/addressbook/__pycache__/*
+addons/backup_restore/__pycache__/*
 dist/*
 build/*
 protocols/__pycache__/*

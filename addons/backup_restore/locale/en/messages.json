@@ -1,0 +1,41 @@
+{
+  "lang_name": "English",
+  "br_description": "List, restore and convert backups to the current storage format.",
+  "br_menu_open":   "Restore backup…",
+
+  "br_dlg_title":        "Backup Manager",
+  "br_section_list":     "Detected backups:",
+  "br_col_date":         "Created",
+  "br_col_type":         "Storage format",
+  "br_col_mails":        "Mails",
+  "br_col_size":         "Size",
+  "br_col_path":         "Path",
+
+  "br_btn_restore":      "Restore backup",
+  "br_btn_browse":       "Browse folder…",
+  "br_btn_refresh":      "Refresh",
+
+  "br_type_sqlite_one":         "SQLite (single DB)",
+  "br_type_sqlite_per_account": "SQLite (per account)",
+  "br_type_files":              "Files",
+  "br_type_mbox":               "Mbox",
+  "br_type_unknown":            "Unknown",
+
+  "br_confirm_title":   "Restore backup",
+  "br_confirm_msg":     "Restore backup from {date}?\n\nFormat: {format}\n\nCurrent data will be backed up first, then overwritten.\nThe application will restart afterwards.\n\nContinue?",
+
+  "br_no_backup_selected":  "Please select a backup from the list or choose a folder.",
+  "br_backup_not_valid":    "The selected folder does not contain a recognizable backup.",
+  "br_backup_ok":           "Backup from {date} restored successfully.",
+  "br_error_restore":       "Restore error:\n{error}",
+  "br_progress_backup_current": "Backing up current data…",
+  "br_progress_restore":    "Restoring backup…",
+  "br_progress_convert":    "Converting to current format ({mode})…",
+  "br_progress_done":       "Done. Restarting application…",
+  "br_no_backups_found":    "No backups found in backup folder.",
+  "br_hint_select":         "Select a backup from the list or click 'Browse folder…'.",
+
+  "br_size_b":   "{n} B",
+  "br_size_kb":  "{n} KB",
+  "br_size_mb":  "{n} MB"
+}
