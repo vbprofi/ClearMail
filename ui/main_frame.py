@@ -704,8 +704,19 @@ class MainFrame(wx.Frame):
                 if wx.MessageBox(tr("delete_account_msg", name=acc["name"]),
                                  tr("delete_account_title"),
                                  wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING, self) == wx.YES:
+                    # Prüfen ob selektierter Ordner zum zu löschenden Konto gehört
+                    if self._selected_mailbox_id:
+                        sc = self.controller.db._get_structure_conn()
+                        mb_row = sc.execute(
+                            "SELECT id FROM mailboxes WHERE account_id=?", (acc["id"],)
+                        ).fetchone()
+                        if mb_row and mb_row[0] == self._selected_mailbox_id:
+                            self._selected_folder_id  = None
+                            self._selected_mail_id    = None
+                            self._selected_mailbox_id = None
+                            self.folder_panel._selected_folder_id = None
                     self.controller.delete_account(acc["id"])
-                    self.folder_panel.reload()  # Baumstruktur aktualisieren
+                    self.folder_panel.reload()
                     self.mail_list_panel.load_mails([])
                     self.mail_preview_panel.clear()
 
@@ -738,6 +749,7 @@ class MainFrame(wx.Frame):
             self.mi_fetch_cur.Enable(True)
             self._hide_gauge()
             self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
+            # reload() stellt selektierten Ordner intern still wieder her
             self.folder_panel.reload()
             if self._selected_folder_id:
                 saved_mail_id = self._selected_mail_id
@@ -838,6 +850,7 @@ class MainFrame(wx.Frame):
             self._hide_gauge()
             self.status_bar.SetStatusText(
                 tr("outbox_empty") if count == 0 else tr("smtp_send_ok", count=count), 0)
+            # reload() stellt selektierten Ordner intern still wieder her
             self.folder_panel.reload()
             if self._selected_folder_id:
                 mails = self.controller.get_mails(self._selected_folder_id)
@@ -1081,20 +1094,17 @@ class MainFrame(wx.Frame):
     def _on_auto_fetch_done(self, count: int):
         """
         Wird nach erfolgreichem Auto-Fetch im Haupt-Thread aufgerufen.
-
-        FIX: Speichert den aktuell fokussierten Mail-Index VOR dem Neuladen
-        und stellt ihn NACH dem Neuladen wieder her, damit der Fokus nicht
-        verloren geht wenn neue Mails eintreffen.
+        Stellt sowohl Mail-Fokus (ListCtrl) als auch Ordner-Fokus (TreeCtrl) wieder her.
+        Der Ordnerbaum springt NICHT mehr nach oben zum Postfach-Root.
         """
         self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
+        # reload() merkt intern den selektierten Ordner und stellt ihn still wieder her
         self.folder_panel.reload()
         if self._selected_folder_id:
-            # Fokus sichern
             saved_mail_id = self._selected_mail_id
             mails = self.controller.get_mails(self._selected_folder_id)
             self.mail_list_panel.load_mails(mails)
             self.folder_panel.refresh_folder_unread(self._selected_folder_id)
-            # Fokus wiederherstellen
             if saved_mail_id:
                 wx.CallAfter(self.mail_list_panel.select_mail_by_id, saved_mail_id)
 

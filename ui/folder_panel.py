@@ -1,6 +1,23 @@
 """
 FolderPanel – Linke Seite: Baumstruktur der Postfächer und Ordner.
-Vollständig i18n-fähig. Papierkorb-Unterstützung.
+
+Accessibility / Fokus-Persistenz (2026-05):
+  Jede Operation die den Baum verändert (reload, refresh_folder_unread,
+  Ordner anlegen/löschen) speichert die aktuell selektierte Ordner-ID
+  VORHER und stellt sie NACHHER wieder her – inklusive EnsureVisible und
+  SetFocus damit Screenreader wie NVDA die Selektion korrekt ansagen.
+
+  Gespeicherte Zustände:
+    _selected_folder_id   – zuletzt vom User gewählter Ordner (ID)
+    _expanded_mailbox_ids – aufgeklappte Postfächer (IDs)
+
+  reload() stellt beides wieder her ohne ein EVT_TREE_SEL_CHANGED
+  auszulösen (SelectItem mit suppress-Flag).
+
+  Schnittstelle nach außen (MainFrame):
+    select_folder_by_id(id)   – wählt Ordner aus, löst on_folder_selected aus
+    restore_focus()           – setzt Fokus auf zuletzt selektierten Ordner
+                                ohne on_folder_selected erneut auszulösen
 """
 
 import wx
@@ -32,10 +49,17 @@ class FolderPanel(wx.Panel):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        self.on_folder_selected = None
+        self.on_folder_selected = None   # Callback: (folder_id, name, mailbox_id)
 
-        self._folder_map  = {}
-        self._mailbox_map = {}
+        self._folder_map  = {}   # TreeItemId → folder-dict
+        self._mailbox_map = {}   # TreeItemId → mailbox-dict
+
+        # Persistierter Zustand – überlebt reload()
+        self._selected_folder_id:    int | None = None
+        self._expanded_mailbox_ids:  set        = set()
+
+        # Während reload() kein EVT_TREE_SEL_CHANGED feuern
+        self._suppress_selection_event = False
 
         self._build_ui()
         self._build_image_list()
@@ -43,7 +67,7 @@ class FolderPanel(wx.Panel):
         self.reload()
 
     # ------------------------------------------------------------------ #
-    #  UI                                                                 #
+    #  UI-Aufbau                                                          #
     # ------------------------------------------------------------------ #
 
     def _build_ui(self):
@@ -78,46 +102,104 @@ class FolderPanel(wx.Panel):
         self._image_list = il
 
     def _bind_events(self):
-        self.tree.Bind(wx.EVT_TREE_SEL_CHANGED,     self._on_selection_changed)
-        self.tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED,  self._on_item_activated)
+        self.tree.Bind(wx.EVT_TREE_SEL_CHANGED,      self._on_selection_changed)
+        self.tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED,   self._on_item_activated)
         self.tree.Bind(wx.EVT_TREE_ITEM_RIGHT_CLICK, self._on_item_right_click)
-        self.tree.Bind(wx.EVT_CONTEXT_MENU,          self._on_context_menu_key)
+        self.tree.Bind(wx.EVT_CONTEXT_MENU,           self._on_context_menu_key)
+        # Auf- und Zuklappen merken für korrekte Wiederherstellung nach reload()
+        self.tree.Bind(wx.EVT_TREE_ITEM_EXPANDED,    self._on_item_expanded)
+        self.tree.Bind(wx.EVT_TREE_ITEM_COLLAPSED,   self._on_item_collapsed)
+        # Accessibility: bei Tab/Shift+Tab-Fokus zuletzt selektierten Ordner anzeigen
+        self.tree.Bind(wx.EVT_SET_FOCUS,              self._on_tree_focus)
+
+    # ------------------------------------------------------------------ #
+    #  Zustand sichern / wiederherstellen                                 #
+    # ------------------------------------------------------------------ #
+
+    def _save_expanded_state(self):
+        """Alle aufgeklappten Postfach-IDs merken."""
+        self._expanded_mailbox_ids = set()
+        for item, mb in self._mailbox_map.items():
+            try:
+                if self.tree.IsExpanded(item):
+                    self._expanded_mailbox_ids.add(mb["id"])
+            except RuntimeError:
+                pass
+
+    def _on_item_expanded(self, event):
+        item = event.GetItem()
+        mb   = self._mailbox_map.get(item)
+        if mb:
+            self._expanded_mailbox_ids.add(mb["id"])
+        event.Skip()
+
+    def _on_item_collapsed(self, event):
+        item = event.GetItem()
+        mb   = self._mailbox_map.get(item)
+        if mb:
+            self._expanded_mailbox_ids.discard(mb["id"])
+        event.Skip()
 
     # ------------------------------------------------------------------ #
     #  Daten laden                                                        #
     # ------------------------------------------------------------------ #
 
     def reload(self):
-        self.tree.DeleteAllItems()
-        self._folder_map.clear()
-        self._mailbox_map.clear()
+        """
+        Baut den Ordnerbaum komplett neu auf.
+        Stellt danach selektierten Ordner UND aufgeklappte Postfächer wieder
+        her, OHNE ein on_folder_selected-Event auszulösen.
+        Der Fokus bleibt beim zuvor ausgewählten Ordner.
+        """
+        # Zustand VOR dem Löschen sichern
+        self._save_expanded_state()
+        saved_folder_id = self._selected_folder_id
 
-        root      = self.tree.AddRoot("Root")
-        mailboxes = self.controller.get_mailboxes()
+        # Baum neu aufbauen (suppress damit kein Callback feuert)
+        self._suppress_selection_event = True
+        try:
+            self.tree.DeleteAllItems()
+            self._folder_map.clear()
+            self._mailbox_map.clear()
 
-        for mb in mailboxes:
-            mb_item = self.tree.AppendItem(root, mb["name"], ICON_MAILBOX, ICON_MAILBOX)
-            self.tree.SetItemBold(mb_item, True)
-            self.tree.SetItemData(mb_item, ("mailbox", mb["id"]))
-            self._mailbox_map[mb_item] = dict(mb)
+            root      = self.tree.AddRoot("Root")
+            mailboxes = self.controller.get_mailboxes()
 
-            folders = self.controller.get_folders(mb["id"])
-            self._add_folder_items(mb_item, folders, parent_id=None)
-            self.tree.Expand(mb_item)
+            for mb in mailboxes:
+                mb_dict = dict(mb)
+                mb_item = self.tree.AppendItem(
+                    root, mb_dict["name"], ICON_MAILBOX, ICON_MAILBOX
+                )
+                self.tree.SetItemBold(mb_item, True)
+                self.tree.SetItemData(mb_item, ("mailbox", mb_dict["id"]))
+                self._mailbox_map[mb_item] = mb_dict
+
+                folders = self.controller.get_folders(mb_dict["id"])
+                self._add_folder_items(mb_item, folders, parent_id=None)
+
+                # Expand-Zustand wiederherstellen
+                # Standardmäßig alle aufgeklappt; merken welche explizit zugeklappt wurden
+                if mb_dict["id"] in self._expanded_mailbox_ids or not self._expanded_mailbox_ids:
+                    self.tree.Expand(mb_item)
+        finally:
+            self._suppress_selection_event = False
+
+        # Selektierten Ordner wiederherstellen (kein Callback)
+        if saved_folder_id:
+            self._restore_selection_silent(saved_folder_id)
 
     def _add_folder_items(self, parent_item, folders, parent_id):
-        # Thunderbird-Reihenfolge: inbox zuerst, archiv zuletzt
         FOLDER_ORDER = {
             "inbox": 0, "sent": 1, "drafts": 2, "outbox": 3,
             "trash": 4, "spam": 5, "archive": 6, "custom": 7,
         }
-        # Nur Ordner dieser Ebene, sortiert nach Typ dann Name
         level = [f for f in folders if f["parent_id"] == parent_id]
         level.sort(key=lambda f: (
             FOLDER_ORDER.get(f["folder_type"] or "custom", 7),
             (f["name"] or "").lower()
         ))
         for f in level:
+            f        = dict(f)
             unread   = f["unread"] or 0
             icon_idx = FOLDER_TYPE_ICONS.get(f["folder_type"], ICON_FOLDER)
             label    = f["name"] if not unread else f"{f['name']} ({unread})"
@@ -125,29 +207,66 @@ class FolderPanel(wx.Panel):
             item = self.tree.AppendItem(parent_item, label, icon_idx, icon_idx)
             self.tree.SetItemData(item, ("folder", f["id"]))
             self.tree.SetItemBold(item, unread > 0)
-            self._folder_map[item] = dict(f)
+            self._folder_map[item] = f
 
             self._add_folder_items(item, folders, parent_id=f["id"])
+
+    def _restore_selection_silent(self, folder_id: int):
+        """
+        Setzt die Selektion auf folder_id, OHNE on_folder_selected auszulösen.
+        Stellt auch EnsureVisible sicher.
+        """
+        self._suppress_selection_event = True
+        try:
+            for item, f in self._folder_map.items():
+                if f.get("id") == folder_id:
+                    try:
+                        self.tree.SelectItem(item)
+                        self.tree.EnsureVisible(item)
+                    except RuntimeError:
+                        pass
+                    return
+        finally:
+            self._suppress_selection_event = False
 
     # ------------------------------------------------------------------ #
     #  Tree-Events                                                        #
     # ------------------------------------------------------------------ #
 
     def _on_selection_changed(self, event):
+        if self._suppress_selection_event:
+            event.Skip()
+            return
         try:
             item = event.GetItem()
             if not item.IsOk():
                 return
             data = self.tree.GetItemData(item)
             if data and data[0] == "folder":
-                f           = self._folder_map.get(item, {})
-                folder_id   = data[1]
-                folder_name = f.get("name", "")
-                mailbox_id  = f.get("mailbox_id")
+                f          = self._folder_map.get(item, {})
+                folder_id  = data[1]
+                # Persistieren
+                self._selected_folder_id = folder_id
                 if self.on_folder_selected:
-                    self.on_folder_selected(folder_id, folder_name, mailbox_id)
+                    self.on_folder_selected(
+                        folder_id,
+                        f.get("name", ""),
+                        f.get("mailbox_id"),
+                    )
         except RuntimeError:
             pass
+
+    def _on_tree_focus(self, event):
+        """
+        Accessibility: Wird bei Tab/Shift+Tab aufgerufen.
+        Stellt die Selektion auf den zuletzt ausgewählten Ordner her,
+        damit Screenreader (NVDA, JAWS) den richtigen Eintrag ansagen
+        statt zum Root zu springen.
+        """
+        event.Skip()   # Fokus-Verarbeitung nicht unterbrechen
+        if self._selected_folder_id:
+            # Nur Selektion anzeigen, kein erneuter Callback
+            wx.CallAfter(self._restore_selection_silent, self._selected_folder_id)
 
     def _on_item_activated(self, event):
         try:
@@ -178,7 +297,6 @@ class FolderPanel(wx.Panel):
 
     def _show_context_menu(self, item):
         menu = wx.Menu()
-
         if item and item.IsOk():
             data      = self.tree.GetItemData(item)
             node_type = data[0] if data else None
@@ -192,7 +310,6 @@ class FolderPanel(wx.Panel):
         else:
             menu.Append(wx.ID_ANY, tr("hint_title")).Enable(False)
 
-        # Addon-Erweiterungen
         addon_items = self.controller.addon_mgr.get_folder_context_items(
             item_type=node_type,
             item_data=self._get_item_data_dict(item),
@@ -217,7 +334,7 @@ class FolderPanel(wx.Panel):
         mi_new    = menu.Append(wx.ID_ANY, tr("ctx_folder_new"))
         mi_rename = menu.Append(wx.ID_ANY, tr("ctx_mailbox_rename"))
         mi_remove = menu.Append(wx.ID_ANY, tr("ctx_mailbox_remove"))
-        self.Bind(wx.EVT_MENU, lambda e: self._on_new_folder(item),    mi_new)
+        self.Bind(wx.EVT_MENU, lambda e: self._on_new_folder(item),     mi_new)
         self.Bind(wx.EVT_MENU, lambda e: self._on_rename_mailbox(item), mi_rename)
         self.Bind(wx.EVT_MENU, lambda e: self._on_remove_mailbox(item), mi_remove)
 
@@ -238,7 +355,7 @@ class FolderPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, lambda e: self._on_delete_folder(item), mi_delete)
 
     # ------------------------------------------------------------------ #
-    #  Aktionen                                                           #
+    #  Ordner-Aktionen                                                    #
     # ------------------------------------------------------------------ #
 
     def _on_new_folder(self, parent_item):
@@ -252,18 +369,20 @@ class FolderPanel(wx.Panel):
             return
         conn = self.controller.db._get_mailstore_conn()
         conn.execute(
-            "INSERT INTO folders (mailbox_id, parent_id, name, folder_type) VALUES (?, NULL, ?, 'custom')",
+            "INSERT INTO folders (mailbox_id, parent_id, name, folder_type) "
+            "VALUES (?, NULL, ?, 'custom')",
             (mb["id"], name)
         )
         conn.commit()
         folder_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        # IMAP-Server synchronisieren
         import threading
         threading.Thread(
             target=self.controller.imap_create_folder,
             args=(folder_id, None),
             daemon=True
         ).start()
+        # Fokus auf neuen Ordner setzen nach reload
+        self._selected_folder_id = folder_id
         self.reload()
 
     def _on_new_subfolder(self, parent_item):
@@ -277,7 +396,8 @@ class FolderPanel(wx.Panel):
             return
         conn = self.controller.db._get_mailstore_conn()
         conn.execute(
-            "INSERT INTO folders (mailbox_id, parent_id, name, folder_type) VALUES (?, ?, ?, 'custom')",
+            "INSERT INTO folders (mailbox_id, parent_id, name, folder_type) "
+            "VALUES (?, ?, ?, 'custom')",
             (f["mailbox_id"], f["id"], name)
         )
         conn.commit()
@@ -288,6 +408,7 @@ class FolderPanel(wx.Panel):
             args=(folder_id, f["id"]),
             daemon=True
         ).start()
+        self._selected_folder_id = folder_id
         self.reload()
 
     def _on_rename_folder(self, item):
@@ -303,9 +424,11 @@ class FolderPanel(wx.Panel):
         conn = self.controller.db._get_mailstore_conn()
         conn.execute("UPDATE folders SET name = ? WHERE id = ?", (new_name, f["id"]))
         conn.commit()
-        self.tree.SetItemText(item, new_name)
+        # Nur Label aktualisieren – kein full reload nötig, Fokus bleibt
+        unread = f.get("unread") or 0
+        label  = new_name if not unread else f"{new_name} ({unread})"
+        self.tree.SetItemText(item, label)
         self._folder_map[item]["name"] = new_name
-        # IMAP-Server synchronisieren
         import threading
         threading.Thread(
             target=self.controller.imap_rename_folder,
@@ -329,7 +452,6 @@ class FolderPanel(wx.Panel):
 
         folder_id = f["id"]
         self.controller.delete_folder(folder_id, f["mailbox_id"], use_trash=use_trash)
-        # IMAP-Server synchronisieren (nur wenn wirklich gelöscht, nicht in Papierkorb)
         if not use_trash:
             import threading
             threading.Thread(
@@ -337,8 +459,23 @@ class FolderPanel(wx.Panel):
                 args=(folder_id,),
                 daemon=True
             ).start()
+
+        # Fokus auf Elternelement setzen bevor Item gelöscht wird
+        parent_item = self.tree.GetItemParent(item)
         del self._folder_map[item]
         self.tree.Delete(item)
+
+        # Falls der gelöschte Ordner ausgewählt war → Eltern oder Root fokussieren
+        if self._selected_folder_id == folder_id:
+            self._selected_folder_id = None
+            if parent_item and parent_item.IsOk():
+                try:
+                    self._suppress_selection_event = True
+                    self.tree.SelectItem(parent_item)
+                    self.tree.EnsureVisible(parent_item)
+                    self.tree.SetFocus()
+                finally:
+                    self._suppress_selection_event = False
 
     def _on_rename_mailbox(self, item):
         mb = self._mailbox_map.get(item)
@@ -372,7 +509,72 @@ class FolderPanel(wx.Panel):
         conn.execute("DELETE FROM folders   WHERE mailbox_id = ?", (mb["id"],))
         conn.execute("DELETE FROM mailboxes WHERE id = ?",         (mb["id"],))
         conn.commit()
+        # Selektierten Ordner zurücksetzen wenn er zu diesem Postfach gehörte
+        if self._selected_folder_id:
+            for f in list(self._folder_map.values()):
+                if f.get("mailbox_id") == mb["id"] and f.get("id") == self._selected_folder_id:
+                    self._selected_folder_id = None
+                    break
         self.reload()
+
+    # ------------------------------------------------------------------ #
+    #  Öffentliche API                                                    #
+    # ------------------------------------------------------------------ #
+
+    def select_folder_by_id(self, folder_id: int):
+        """
+        Wählt einen Ordner aus und löst on_folder_selected aus.
+        Wird von MainFrame aufgerufen (z.B. beim Start oder nach fetch).
+        """
+        self._selected_folder_id = folder_id
+        for item, f in self._folder_map.items():
+            if f.get("id") == folder_id:
+                try:
+                    self._suppress_selection_event = False  # Callback erwünscht
+                    self.tree.SelectItem(item)
+                    self.tree.EnsureVisible(item)
+                except RuntimeError:
+                    pass
+                return
+
+    def restore_focus(self):
+        """
+        Setzt den Fokus auf den zuletzt ausgewählten Ordner OHNE
+        on_folder_selected auszulösen (z.B. nach Auto-Fetch).
+        Geeignet für Screenreader: NVDA/JAWS lesen die neue Position an.
+        """
+        if self._selected_folder_id:
+            self._restore_selection_silent(self._selected_folder_id)
+        # Fokus nur setzen wenn der Ordnerbaum aktuell das Fokus-Fenster ist
+        # oder wenn restore_focus() explizit aufgerufen wird
+        try:
+            if self.tree.IsShownOnScreen():
+                self.tree.SetFocus()
+        except RuntimeError:
+            pass
+
+    def refresh_folder_unread(self, folder_id: int):
+        """
+        Aktualisiert Ungelesen-Zähler und Fettschrift eines einzelnen Ordners.
+        Kein reload() – Baum-Position und Fokus bleiben erhalten.
+        """
+        for item, f in self._folder_map.items():
+            if f["id"] != folder_id:
+                continue
+            folders = self.controller.get_folders(f["mailbox_id"])
+            for updated in folders:
+                updated = dict(updated)
+                if updated["id"] == folder_id:
+                    unread = updated["unread"] or 0
+                    label  = updated["name"] if not unread else f"{updated['name']} ({unread})"
+                    try:
+                        self.tree.SetItemText(item, label)
+                        self.tree.SetItemBold(item, unread > 0)
+                    except RuntimeError:
+                        pass
+                    self._folder_map[item] = updated
+                    break
+            break
 
     # ------------------------------------------------------------------ #
     #  Hilfsmethoden                                                      #
@@ -389,33 +591,6 @@ class FolderPanel(wx.Panel):
         if data[0] == "mailbox":
             return self._mailbox_map.get(item, {})
         return {}
-
-    def refresh_folder_unread(self, folder_id: int):
-        for item, f in self._folder_map.items():
-            if f["id"] != folder_id:
-                continue
-            folders = self.controller.get_folders(f["mailbox_id"])
-            for updated in folders:
-                if updated["id"] == folder_id:
-                    unread = updated["unread"] or 0
-                    label  = updated["name"] if not unread else f"{updated['name']} ({unread})"
-                    self.tree.SetItemText(item, label)
-                    self.tree.SetItemBold(item, unread > 0)
-                    self._folder_map[item] = dict(updated)
-                    break
-            break
-
-
-    def select_folder_by_id(self, folder_id: int):
-        """Sucht den Ordner mit der gegebenen ID und selektiert ihn im Baum."""
-        for item, f in self._folder_map.items():
-            if f.get("id") == folder_id:
-                try:
-                    self.tree.SelectItem(item)
-                    self.tree.EnsureVisible(item)
-                except RuntimeError:
-                    pass
-                return
 
     def get_selected_folder_name(self) -> str:
         item = self.tree.GetSelection()
