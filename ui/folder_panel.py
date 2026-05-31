@@ -189,19 +189,42 @@ class FolderPanel(wx.Panel):
             self._restore_selection_silent(saved_folder_id)
 
     def _add_folder_items(self, parent_item, folders, parent_id):
+        """
+        Fügt Ordner-Einträge zum Baum hinzu.
+
+        Sortierung (Priorität):
+          1. sort_order-Spalte wenn vorhanden (manuell vom User via FolderOrder-Addon)
+          2. Fallback: FOLDER_ORDER-Typ dann Name (Thunderbird-Standard)
+
+        Das erlaubt dem FolderOrder-Addon die Position beliebig zu setzen
+        ohne dass _add_folder_items die Reihenfolge überschreibt.
+        """
         FOLDER_ORDER = {
             "inbox": 0, "sent": 1, "drafts": 2, "outbox": 3,
             "trash": 4, "spam": 5, "archive": 6, "custom": 7,
         }
-        level = [f for f in folders if f["parent_id"] == parent_id]
-        level.sort(key=lambda f: (
-            FOLDER_ORDER.get(f["folder_type"] or "custom", 7),
-            (f["name"] or "").lower()
-        ))
+        level = [dict(f) for f in folders if f["parent_id"] == parent_id]
+
+        # Prüfen ob sort_order in den Daten vorhanden ist
+        has_sort_order = level and "sort_order" in level[0]
+
+        if has_sort_order:
+            # Manuell sortiert – sort_order respektieren, Typ/Name als Tiebreaker
+            level.sort(key=lambda f: (
+                int(f.get("sort_order") or 0),
+                FOLDER_ORDER.get(f.get("folder_type") or "custom", 7),
+                (f.get("name") or "").lower()
+            ))
+        else:
+            # Standard: Thunderbird-Reihenfolge
+            level.sort(key=lambda f: (
+                FOLDER_ORDER.get(f.get("folder_type") or "custom", 7),
+                (f.get("name") or "").lower()
+            ))
+
         for f in level:
-            f        = dict(f)
-            unread   = f["unread"] or 0
-            icon_idx = FOLDER_TYPE_ICONS.get(f["folder_type"], ICON_FOLDER)
+            unread   = f.get("unread") or 0
+            icon_idx = FOLDER_TYPE_ICONS.get(f.get("folder_type"), ICON_FOLDER)
             label    = f["name"] if not unread else f"{f['name']} ({unread})"
 
             item = self.tree.AppendItem(parent_item, label, icon_idx, icon_idx)

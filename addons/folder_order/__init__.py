@@ -1,10 +1,20 @@
 """
-Addon: FolderOrder
-Erweitert das Kontextmenü der Ordnerbaumstruktur um:
-  • "Nach oben verschieben"  – verschiebt Element eine Stufe höher
-  • "Nach unten verschieben" – verschiebt Element eine Stufe tiefer
+Addon: FolderOrder  v1.1
+Manuelle Sortierung von Postfächern und Ordnern (inkl. Unterordner).
 
-Sprachdateien: locale/de/messages.json, locale/en/messages.json
+Funktionen:
+  • "Nach oben"   / "Nach unten"   im Kontextmenü (alle Ebenen)
+  • "Ganz nach oben" / "Ganz nach unten"
+  • Tastaturkürzel Alt+↑ / Alt+↓ wenn der Ordnerbaum fokussiert ist
+  • Die benutzerdefinierte Reihenfolge wird in sort_order-Spalte gespeichert
+    und von folder_panel._add_folder_items() respektiert sobald vorhanden.
+
+Korrekturen v1.1:
+  - Unterordner werden korrekt verschoben (parent_id-Filter)
+  - _ensure_sort_columns() verwendet _get_structure_conn() (thread-sicher)
+  - reload() nach Move beibehält selektierten Ordner (neues folder_panel)
+  - Alt+Pfeil-Tastaturkürzel direkt am TreeCtrl gebunden
+  - "Ganz nach oben" / "Ganz nach unten" als neue Menüeinträge
 """
 
 import wx
@@ -15,7 +25,7 @@ from core.i18n import tr
 class Addon(AddonBase):
 
     NAME    = "FolderOrder"
-    VERSION = "1.2.0"
+    VERSION = "1.1.0"
 
     @property
     def DESCRIPTION(self):
@@ -23,21 +33,25 @@ class Addon(AddonBase):
 
     def on_load(self):
         self._ensure_sort_columns()
+        # Alt+Pfeil-Tastenkürzel am TreeCtrl registrieren
+        wx.CallAfter(self._bind_keyboard_shortcuts)
 
     # ------------------------------------------------------------------ #
-    #  Kontextmenü                                                        #
+    #  Kontextmenü (wird von FolderPanel eingebunden)                    #
     # ------------------------------------------------------------------ #
 
     def get_folder_context_items(self, item_type: str, item_data: dict) -> list:
         if item_type not in ("folder", "mailbox") or not item_data:
             return []
         return [
-            {"label": tr("fo_move_up"),   "handler": self._move_up,   "enabled": True},
-            {"label": tr("fo_move_down"), "handler": self._move_down, "enabled": True},
+            {"label": tr("fo_move_top"),    "handler": self._move_top,    "enabled": True},
+            {"label": tr("fo_move_up"),     "handler": self._move_up,     "enabled": True},
+            {"label": tr("fo_move_down"),   "handler": self._move_down,   "enabled": True},
+            {"label": tr("fo_move_bottom"), "handler": self._move_bottom, "enabled": True},
         ]
 
     # ------------------------------------------------------------------ #
-    #  Move-Logik                                                         #
+    #  Handler                                                            #
     # ------------------------------------------------------------------ #
 
     def _move_up(self, tree_item, item_data: dict):
@@ -46,91 +60,156 @@ class Addon(AddonBase):
     def _move_down(self, tree_item, item_data: dict):
         self._move(item_data, direction=+1)
 
-    def _move(self, item_data: dict, direction: int):
-        self._ensure_sort_columns()
+    def _move_top(self, tree_item, item_data: dict):
+        self._move_to_edge(item_data, to_top=True)
 
-        conn    = self.controller.db._get_mailstore_conn()
+    def _move_bottom(self, tree_item, item_data: dict):
+        self._move_to_edge(item_data, to_top=False)
+
+    # ------------------------------------------------------------------ #
+    #  Tastaturkürzel: Alt+↑ / Alt+↓ am TreeCtrl                        #
+    # ------------------------------------------------------------------ #
+
+    def _bind_keyboard_shortcuts(self):
+        panel = self._find_folder_panel()
+        if not panel:
+            return
+        try:
+            panel.tree.Bind(wx.EVT_KEY_DOWN, self._on_tree_key)
+        except Exception:
+            pass
+
+    def _on_tree_key(self, event: wx.KeyEvent):
+        key = event.GetKeyCode()
+        alt = event.AltDown()
+        if not alt or key not in (wx.WXK_UP, wx.WXK_DOWN):
+            event.Skip()
+            return
+        panel = self._find_folder_panel()
+        if not panel:
+            event.Skip()
+            return
+        item = panel.tree.GetSelection()
+        if not item or not item.IsOk():
+            event.Skip()
+            return
+        data = panel.tree.GetItemData(item)
+        if not data:
+            event.Skip()
+            return
+        node_type = data[0]
+        if node_type == "folder":
+            item_data = panel._folder_map.get(item, {})
+        elif node_type == "mailbox":
+            item_data = panel._mailbox_map.get(item, {})
+        else:
+            event.Skip()
+            return
+        if key == wx.WXK_UP:
+            self._move(item_data, direction=-1)
+        else:
+            self._move(item_data, direction=+1)
+
+    # ------------------------------------------------------------------ #
+    #  Move-Kern                                                          #
+    # ------------------------------------------------------------------ #
+
+    def _get_siblings(self, item_data: dict):
+        """
+        Gibt (conn, table, siblings_list) zurück.
+        siblings_list: [(id, sort_order), ...] geordnet nach sort_order, id
+        """
+        self._ensure_sort_columns()
+        conn    = self.controller.db._get_structure_conn()
         item_id = item_data.get("id")
         if not item_id:
-            return
+            return None, None, None
 
-        # Postfach (hat account_id, kein mailbox_id)
         if "account_id" in item_data:
+            # Postfach-Ebene
             siblings = conn.execute(
                 "SELECT id, sort_order FROM mailboxes ORDER BY sort_order, id"
             ).fetchall()
-            table = "mailboxes"
+            return conn, "mailboxes", siblings
 
-        # Ordner (hat mailbox_id)
-        elif "mailbox_id" in item_data:
+        if "mailbox_id" in item_data:
             mailbox_id = item_data["mailbox_id"]
             parent_id  = item_data.get("parent_id")
-
             if parent_id is None:
                 siblings = conn.execute(
                     "SELECT id, sort_order FROM folders "
-                    "WHERE mailbox_id = ? AND parent_id IS NULL "
+                    "WHERE mailbox_id=? AND parent_id IS NULL "
                     "ORDER BY sort_order, id",
                     (mailbox_id,)
                 ).fetchall()
             else:
                 siblings = conn.execute(
                     "SELECT id, sort_order FROM folders "
-                    "WHERE mailbox_id = ? AND parent_id = ? "
+                    "WHERE mailbox_id=? AND parent_id=? "
                     "ORDER BY sort_order, id",
                     (mailbox_id, parent_id)
                 ).fetchall()
-            table = "folders"
+            return conn, "folders", siblings
 
-        else:
-            return
+        return None, None, None
 
-        ids = [row[0] for row in siblings]
-        if item_id not in ids:
-            wx.MessageBox(
-                tr("fo_not_found"),
-                tr("fo_error_title"), wx.OK | wx.ICON_ERROR
+    def _write_order(self, conn, table: str, ordered_ids: list):
+        """Schreibt sort_order in Zehnerschritten für ordered_ids."""
+        for i, oid in enumerate(ordered_ids):
+            conn.execute(
+                f"UPDATE {table} SET sort_order=? WHERE id=?",
+                (i * 10, oid)
             )
-            return
+        conn.commit()
 
+    def _move(self, item_data: dict, direction: int):
+        conn, table, siblings = self._get_siblings(item_data)
+        if conn is None:
+            return
+        item_id = item_data.get("id")
+        ids     = [row[0] for row in siblings]
+        if item_id not in ids:
+            wx.MessageBox(tr("fo_not_found"), tr("fo_error_title"), wx.OK | wx.ICON_ERROR)
+            return
         pos      = ids.index(item_id)
         swap_pos = pos + direction
-
         if swap_pos < 0 or swap_pos >= len(ids):
             msg = tr("fo_already_top") if direction == -1 else tr("fo_already_bottom")
             wx.MessageBox(msg, tr("fo_title"), wx.OK | wx.ICON_INFORMATION)
             return
+        ids[pos], ids[swap_pos] = ids[swap_pos], ids[pos]
+        self._write_order(conn, table, ids)
+        self._reload()
 
-        # Sequenzielle sort_order-Werte vergeben (verhindert Duplikate/NULL)
-        for i, (sid, _) in enumerate(siblings):
-            conn.execute(
-                f"UPDATE {table} SET sort_order = ? WHERE id = ?",
-                (i * 10, sid)
-            )
+    def _move_to_edge(self, item_data: dict, to_top: bool):
+        conn, table, siblings = self._get_siblings(item_data)
+        if conn is None:
+            return
+        item_id = item_data.get("id")
+        ids     = [row[0] for row in siblings]
+        if item_id not in ids:
+            wx.MessageBox(tr("fo_not_found"), tr("fo_error_title"), wx.OK | wx.ICON_ERROR)
+            return
+        ids.remove(item_id)
+        if to_top:
+            ids.insert(0, item_id)
+        else:
+            ids.append(item_id)
+        self._write_order(conn, table, ids)
+        self._reload()
 
-        order_a = pos      * 10
-        order_b = swap_pos * 10
-
-        conn.execute(
-            f"UPDATE {table} SET sort_order = ? WHERE id = ?",
-            (order_b, ids[pos])
-        )
-        conn.execute(
-            f"UPDATE {table} SET sort_order = ? WHERE id = ?",
-            (order_a, ids[swap_pos])
-        )
-        conn.commit()
-
+    def _reload(self):
         panel = self._find_folder_panel()
         if panel:
-            panel.reload()
+            panel.reload()   # stellt selektierten Ordner automatisch wieder her
 
     # ------------------------------------------------------------------ #
     #  Hilfsmethoden                                                      #
     # ------------------------------------------------------------------ #
 
     def _ensure_sort_columns(self):
-        conn = self.controller.db._get_mailstore_conn()
+        """Legt sort_order-Spalte an wenn noch nicht vorhanden."""
+        conn = self.controller.db._get_structure_conn()
         for table in ("mailboxes", "folders"):
             cols = [r[1] for r in conn.execute(
                 f"PRAGMA table_info({table})"
@@ -139,13 +218,11 @@ class Addon(AddonBase):
                 conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN sort_order INTEGER DEFAULT 0"
                 )
-                rows = conn.execute(
-                    f"SELECT id FROM {table} ORDER BY id"
-                ).fetchall()
+                # Initiale Reihenfolge = aktuelle DB-Reihenfolge
+                rows = conn.execute(f"SELECT id FROM {table} ORDER BY id").fetchall()
                 for i, (rid,) in enumerate(rows):
                     conn.execute(
-                        f"UPDATE {table} SET sort_order = ? WHERE id = ?",
-                        (i * 10, rid)
+                        f"UPDATE {table} SET sort_order=? WHERE id=?", (i * 10, rid)
                     )
         conn.commit()
 

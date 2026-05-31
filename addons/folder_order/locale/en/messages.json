@@ -1,11 +1,13 @@
 {
   "lang_name": "English",
-  "fo_description": "Sort folders and mailboxes via context menu",
-  "fo_move_up": "Move up",
-  "fo_move_down": "Move down",
-  "fo_already_top": "The item is already at the top.",
+  "fo_description": "Sort folders and mailboxes via context menu or Alt+Arrow keys",
+  "fo_move_top":    "Move to top",
+  "fo_move_up":     "Move up",
+  "fo_move_down":   "Move down",
+  "fo_move_bottom": "Move to bottom",
+  "fo_already_top":    "The item is already at the top.",
   "fo_already_bottom": "The item is already at the bottom.",
-  "fo_title": "Change position",
-  "fo_not_found": "Item not found in sibling list.\nPlease restart the application.",
+  "fo_title":       "Change position",
+  "fo_not_found":   "Item not found in sibling list.\nPlease restart the application.",
   "fo_error_title": "Error"
 }
