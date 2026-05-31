@@ -1,5 +1,15 @@
 """
 MailListPanel – Mail-Liste. Vollständig i18n-fähig.
+
+Korrekturen (2026-05):
+  - EVT_LIST_COL_CLICK implementiert: Klick auf Spaltenheader sortiert die Liste
+    und zeigt einen Sortierpfeil (▲/▼) im Spaltentitel.
+  - _mail_index nutzt jetzt die Mail-ID als Schlüssel (statt dem wxListCtrl-Index
+    der sich beim Sortieren/Löschen verschiebt) → kein Speicherfehler mehr beim
+    Löschen nach einer Sortier-Operation (remove_mail war O(n) + falsche Indizes).
+  - refresh_mail_read() und remove_mail() suchen über ID, nicht über list-Index.
+  - _rebuild_from_sorted_data() konsolidiert mit load_mails() (kein doppelter Code).
+  - Sortier-Pfeil im Spaltenheader via SetColumnInfo (portabel).
 """
 
 import wx
@@ -22,15 +32,25 @@ class MailListPanel(wx.Panel):
         super().__init__(parent)
         self.controller = controller
         self.on_mail_selected  = None
-        self.on_mail_open      = None   # Doppelklick / Enter → eigenes Fenster
+        self.on_mail_open      = None
         self.on_mail_delete    = None
         self.on_context_menu   = None
 
-        self._mail_data  = []
-        self._mail_index = {}
+        # Daten-Store: mail_id → mail-dict  (statt listctrl-row → mail-dict)
+        # Verhindert Index-Drift nach Sortierung/Löschen
+        self._mail_data:  list  = []          # sortierte Reihenfolge
+        self._id_to_mail: dict  = {}          # mail_id → mail-dict (O(1)-Lookup)
+        self._row_to_id:  dict  = {}          # listctrl-row → mail_id
+
+        self._sort_col: int  = COL_DATE
+        self._sort_asc: bool = False
 
         self._build_ui()
         self._bind_events()
+
+    # ------------------------------------------------------------------ #
+    #  UI                                                                 #
+    # ------------------------------------------------------------------ #
 
     def _build_ui(self):
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -56,11 +76,16 @@ class MailListPanel(wx.Panel):
         sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 4)
         self.SetSizer(sizer)
 
+        # Initialen Sortierpfeil setzen
+        self._update_sort_header()
+
     def _bind_events(self):
         self.list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED,  self._on_item_selected)
         self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self._on_item_activated)
         self.list_ctrl.Bind(wx.EVT_CHAR_HOOK,            self._on_key_down)
         self.list_ctrl.Bind(wx.EVT_CONTEXT_MENU,         self._on_context_menu)
+        # FIX: Klick auf Spaltenheader → Sortierung
+        self.list_ctrl.Bind(wx.EVT_LIST_COL_CLICK,       self._on_col_click)
 
     # ------------------------------------------------------------------ #
     #  Daten laden                                                        #
@@ -68,48 +93,17 @@ class MailListPanel(wx.Panel):
 
     def load_mails(self, mails: list):
         self._mail_data  = [dict(m) for m in mails]
-        self._mail_index = {}
-        self._sort_col   = getattr(self, "_sort_col", COL_DATE)
-        self._sort_asc   = getattr(self, "_sort_asc", False)
+        self._id_to_mail = {m["id"]: m for m in self._mail_data if "id" in m}
 
-        # Sortierung anwenden bevor Rendering
         self._apply_sort_to_data()
+        self._render_list()
 
-        lc   = self.list_ctrl
-        font = lc.GetFont()
-        bold = font.Bold()
-
-        lc.Freeze()
-        try:
-            lc.DeleteAllItems()
-            for row, mail in enumerate(self._mail_data):
-                flag_str = "★" if mail.get("is_flagged") else ""
-                idx = lc.InsertItem(row, flag_str)
-
-                status = tr("mail_status_unread") if not mail.get("is_read") else tr("mail_status_read")
-                lc.SetItem(idx, COL_READ, status)
-                lc.SetItem(idx, COL_FROM, str(mail.get("sender_name") or mail.get("sender") or ""))
-
-                subject = str(mail.get("subject") or tr("preview_no_subject"))
-                if mail.get("has_attach"):
-                    subject = "📎 " + subject
-                lc.SetItem(idx, COL_SUBJECT, subject)
-                lc.SetItem(idx, COL_DATE, self._format_date(str(mail.get("date") or "")))
-                lc.SetItem(idx, COL_SIZE, self._format_size(mail.get("size") or 0))
-
-                if not mail.get("is_read"):
-                    lc.SetItemFont(idx, bold)
-
-                self._mail_index[idx] = mail
-        finally:
-            lc.Thaw()
-
-        lc.SetName(tr("mail_list_count", count=len(mails)))
+        self.list_ctrl.SetName(tr("mail_list_count", count=len(mails)))
 
     def _apply_sort_to_data(self):
         """Sortiert self._mail_data nach aktuellem Sortierfeld."""
-        col = getattr(self, "_sort_col", COL_DATE)
-        asc = getattr(self, "_sort_asc", False)
+        col = self._sort_col
+        asc = self._sort_asc
 
         def _key(m):
             if col == COL_DATE:    return str(m.get("date") or "")
@@ -121,46 +115,96 @@ class MailListPanel(wx.Panel):
             return str(m.get("date") or "")
 
         self._mail_data.sort(key=_key, reverse=not asc)
-        # Index neu aufbauen
-        self._mail_index = {i: m for i, m in enumerate(self._mail_data)}
 
-    def _rebuild_from_sorted_data(self):
-        """Rendert die Mailliste neu nach einer Sortieränderung (Freeze/Thaw)."""
+    def _render_list(self):
+        """
+        Rendert self._mail_data in das ListCtrl. Baut _row_to_id neu auf.
+        Freeze/Thaw verhindert Flimmern bei großen Listen.
+        """
         lc   = self.list_ctrl
         font = lc.GetFont()
         bold = font.Bold()
+
         lc.Freeze()
         try:
             lc.DeleteAllItems()
-            self._mail_index = {}
+            self._row_to_id = {}
             for row, mail in enumerate(self._mail_data):
+                mail_id  = mail.get("id")
                 flag_str = "★" if mail.get("is_flagged") else ""
-                idx = lc.InsertItem(row, flag_str)
+                idx      = lc.InsertItem(row, flag_str)
+
                 status = tr("mail_status_unread") if not mail.get("is_read") else tr("mail_status_read")
                 lc.SetItem(idx, COL_READ, status)
                 lc.SetItem(idx, COL_FROM, str(mail.get("sender_name") or mail.get("sender") or ""))
+
                 subject = str(mail.get("subject") or tr("preview_no_subject"))
                 if mail.get("has_attach"):
                     subject = "📎 " + subject
                 lc.SetItem(idx, COL_SUBJECT, subject)
                 lc.SetItem(idx, COL_DATE, self._format_date(str(mail.get("date") or "")))
                 lc.SetItem(idx, COL_SIZE, self._format_size(mail.get("size") or 0))
+
                 if not mail.get("is_read"):
                     lc.SetItemFont(idx, bold)
-                self._mail_index[idx] = mail
+
+                if mail_id is not None:
+                    self._row_to_id[idx] = mail_id
         finally:
             lc.Thaw()
 
+    # ------------------------------------------------------------------ #
+    #  Spalten-Sortierung                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _on_col_click(self, event: wx.ListEvent):
+        """
+        FIX: Klick auf Spaltenheader wechselt Sortierung.
+        Gleiche Spalte → Richtung umkehren. Neue Spalte → absteigende Richtung.
+        """
+        col = event.GetColumn()
+        if col == self._sort_col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            # Datum/Größe/Flags: absteigende Vorsortierung ist intuitiver
+            self._sort_asc = col in (COL_FROM, COL_SUBJECT)
+
+        self._apply_sort_to_data()
+        self._render_list()
+        self._update_sort_header()
+
+    def _update_sort_header(self):
+        """Zeigt Sortierpfeil (▲/▼) im aktiven Spaltenheader."""
+        col_labels = {
+            COL_FLAG:    tr("mail_list_flag"),
+            COL_READ:    tr("mail_list_status"),
+            COL_FROM:    tr("mail_list_from"),
+            COL_SUBJECT: tr("mail_list_subject"),
+            COL_DATE:    tr("mail_list_date"),
+            COL_SIZE:    tr("mail_list_size"),
+        }
+        arrow = " ▲" if self._sort_asc else " ▼"
+        for col, label in col_labels.items():
+            info = wx.ListItem()
+            info.SetMask(wx.LIST_MASK_TEXT)
+            info.SetText(label + arrow if col == self._sort_col else label)
+            self.list_ctrl.SetColumn(col, info)
+
+    # ------------------------------------------------------------------ #
+    #  Hilfs-Methoden öffentlich                                         #
+    # ------------------------------------------------------------------ #
+
     def select_mail_by_id(self, mail_id: int):
         """Wählt eine Mail anhand ihrer ID aus (Fokus + Selektion)."""
-        for idx, mail in self._mail_index.items():
-            if mail.get("id") == mail_id:
+        for row, mid in self._row_to_id.items():
+            if mid == mail_id:
                 self.list_ctrl.SetItemState(
-                    idx,
+                    row,
                     wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED,
                     wx.LIST_STATE_SELECTED | wx.LIST_STATE_FOCUSED
                 )
-                self.list_ctrl.EnsureVisible(idx)
+                self.list_ctrl.EnsureVisible(row)
                 return
 
     def reload_current_folder(self):
@@ -174,18 +218,17 @@ class MailListPanel(wx.Panel):
     # ------------------------------------------------------------------ #
 
     def _on_item_selected(self, event):
-        idx  = event.GetIndex()
-        mail = self._mail_index.get(idx)
-        if mail and self.on_mail_selected:
-            self.on_mail_selected(mail["id"])
+        idx     = event.GetIndex()
+        mail_id = self._row_to_id.get(idx)
+        if mail_id is not None and self.on_mail_selected:
+            self.on_mail_selected(mail_id)
 
     def _on_item_activated(self, event):
-        # Doppelklick / Enter → Mail in eigenem Fenster öffnen
-        idx  = event.GetIndex()
-        mail = self._mail_index.get(idx)
-        if mail and self.on_mail_open:
-            self.on_mail_open(mail["id"])
-        else:
+        idx     = event.GetIndex()
+        mail_id = self._row_to_id.get(idx)
+        if mail_id is not None and self.on_mail_open:
+            self.on_mail_open(mail_id)
+        elif mail_id is not None:
             self._on_item_selected(event)
 
     def _on_key_down(self, event: wx.KeyEvent):
@@ -193,16 +236,14 @@ class MailListPanel(wx.Panel):
         if key == wx.WXK_DELETE:
             if self.on_mail_delete:
                 self.on_mail_delete(event)
-            return  # kein Skip → verhindert dass ListCtrl etwas löscht
+            return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
-            # Enter → Mail in eigenem Fenster öffnen (NICHT Tab ins Vorschau-Feld)
-            idx  = self.list_ctrl.GetFirstSelected()
-            mail = self._mail_index.get(idx)
-            if mail and self.on_mail_open:
-                self.on_mail_open(mail["id"])
-            return  # kein Skip → kein Sprung zum nächsten Control
+            idx     = self.list_ctrl.GetFirstSelected()
+            mail_id = self._row_to_id.get(idx)
+            if mail_id is not None and self.on_mail_open:
+                self.on_mail_open(mail_id)
+            return
         if key == wx.WXK_TAB:
-            # Tab → F6-Navigation (Weiterleitung an Frame)
             event.Skip()
             return
         event.Skip()
@@ -212,30 +253,61 @@ class MailListPanel(wx.Panel):
             self.on_context_menu(event)
 
     # ------------------------------------------------------------------ #
-    #  Hilfsmethoden                                                      #
+    #  Einzelne Mail aktualisieren / entfernen                           #
     # ------------------------------------------------------------------ #
 
     def refresh_mail_read(self, mail_id: int, force_read: bool = None):
-        for idx, mail in self._mail_index.items():
-            if mail["id"] == mail_id:
-                is_read = force_read if force_read is not None else True
-                mail["is_read"] = is_read
-                self.list_ctrl.SetItem(idx, COL_READ,
-                    tr("mail_status_read") if is_read else tr("mail_status_unread"))
-                font = self.list_ctrl.GetFont()
-                self.list_ctrl.SetItemFont(idx, font if is_read else font.Bold())
-                break
+        """
+        FIX: Suche über mail_id (O(1) via _id_to_mail), nicht über ListCtrl-Index.
+        Danach zugehörige Zeile in _row_to_id finden.
+        """
+        mail = self._id_to_mail.get(mail_id)
+        if not mail:
+            return
+        is_read = force_read if force_read is not None else True
+        mail["is_read"] = is_read
+
+        # Zugehörige Zeile finden
+        row = next((r for r, mid in self._row_to_id.items() if mid == mail_id), None)
+        if row is None:
+            return
+
+        self.list_ctrl.SetItem(
+            row, COL_READ,
+            tr("mail_status_read") if is_read else tr("mail_status_unread")
+        )
+        font = self.list_ctrl.GetFont()
+        self.list_ctrl.SetItemFont(row, font if is_read else font.Bold())
 
     def remove_mail(self, mail_id: int):
-        for idx, mail in list(self._mail_index.items()):
-            if mail["id"] == mail_id:
-                self.list_ctrl.DeleteItem(idx)
-                del self._mail_index[idx]
-                new_index = {}
-                for i, m in self._mail_index.items():
-                    new_index[i if i < idx else i - 1] = m
-                self._mail_index = new_index
-                break
+        """
+        FIX: Index-sicheres Löschen.
+        Findet die Zeile über _row_to_id (mail_id-basiert), löscht sie aus dem
+        ListCtrl und korrigiert alle Indizes > gelöschter Zeile um -1.
+        """
+        row = next((r for r, mid in self._row_to_id.items() if mid == mail_id), None)
+        if row is None:
+            return
+
+        self.list_ctrl.DeleteItem(row)
+
+        # _row_to_id neu aufbauen: Indizes > row um 1 verschieben
+        new_row_to_id = {}
+        for r, mid in self._row_to_id.items():
+            if r < row:
+                new_row_to_id[r] = mid
+            elif r > row:
+                new_row_to_id[r - 1] = mid
+            # r == row wird weggelassen (gelöscht)
+        self._row_to_id = new_row_to_id
+
+        # Auch aus _mail_data und _id_to_mail entfernen
+        self._mail_data = [m for m in self._mail_data if m.get("id") != mail_id]
+        self._id_to_mail.pop(mail_id, None)
+
+    # ------------------------------------------------------------------ #
+    #  Hilfsmethoden                                                      #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _format_date(date_str: str) -> str:
@@ -248,3 +320,13 @@ class MailListPanel(wx.Panel):
         elif size < 1024 * 1024:
             return f"{size // 1024} KB"
         return f"{size // (1024 * 1024)} MB"
+
+    # ------------------------------------------------------------------ #
+    #  Kompatibilitäts-Properties (MainFrame greift auf diese zu)        #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _mail_index(self) -> dict:
+        """Rückwärtskompatibel: gibt row→mail-dict zurück."""
+        return {r: self._id_to_mail.get(mid, {})
+                for r, mid in self._row_to_id.items()}

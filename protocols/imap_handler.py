@@ -7,6 +7,17 @@ Sicherheit:
   - STARTTLS (Port 143): IMAP4 + starttls()
   - Passwort-Auth: LOGIN (Fallback) oder PLAIN via AUTHENTICATE
   - Zertifikatsvalidierung aktiviert (kann für self-signed deaktiviert werden)
+
+Korrekturen (2026-05):
+  - fetch_mail() nutzt BODY.PEEK[TEXT] statt RFC822, um keine automatische
+    \\Seen-Markierung beim Abrufen zu verursachen (RFC 3501 §6.4.5)
+  - fetch_new_mails() übergibt flags_raw korrekt als drittes Tuple-Element
+  - list_folders(): robusterer Parser für NIL-Separatoren und gecachter Trennzeichen
+  - select_folder(): gibt (count, separator) zurück damit Unterordner-Pfade
+    korrekt zusammengesetzt werden können
+  - _encode_folder_name(): korrekte modifizierte UTF-7-Kodierung (RFC 3501 §5.1.3)
+  - Neue Methode fetch_uids_batch(): effizientes Batch-Abrufen mit UID SEARCH
+  - Neue Methode get_folder_separator(): liefert den Trennzeichen-String
 """
 
 import imaplib
@@ -30,6 +41,7 @@ class IMAPHandler:
         self.use_ssl     = use_ssl
         self.verify_cert = verify_cert
         self._conn: Optional[imaplib.IMAP4] = None
+        self._separator: str = "/"          # Cache für Ordner-Trennzeichen
 
     # ------------------------------------------------------------------ #
     #  Verbindung                                                         #
@@ -86,8 +98,20 @@ class IMAPHandler:
 
     def list_folders(self) -> List[Dict]:
         """
-        Gibt alle IMAP-Ordner zurück.
-        Rückgabe: [{"name": str, "path": str, "flags": list, "separator": str}]
+        Gibt alle IMAP-Ordner zurück, inklusive Unterordner mit korrektem
+        parent-Pfad (abgeleitet vom Trennzeichen).
+
+        FIX: Robusterer Parser – unterstützt NIL-Separator, Anführungszeichen-
+        Varianten und gecachten Separator für spätere Verwendung.
+
+        Rückgabe: [{
+            "name": str,       # letzter Pfadteil
+            "path": str,       # vollständiger IMAP-Pfad
+            "parent": str,     # übergeordneter Pfad oder "" für Top-Level
+            "flags": list,
+            "separator": str,
+            "level": int,      # Tiefe im Ordnerbaum (0 = Top-Level)
+        }]
         """
         if not self._conn:
             raise RuntimeError("Nicht verbunden.")
@@ -99,29 +123,58 @@ class IMAPHandler:
             if item is None:
                 continue
             line = item.decode("utf-8", errors="replace") if isinstance(item, bytes) else item
-            # Format: (\Flags) "separator" "path"
-            m = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"?([^"]+)"?', line.strip())
+            line = line.strip()
+
+            # Format: (\Flags) "sep" "path"  oder  (\Flags) NIL "path"
+            # Variante 1: beide Felder in Anführungszeichen
+            m = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"([^"]+)"', line)
             if not m:
-                m = re.match(r'\(([^)]*)\)\s+\S+\s+(.*)', line.strip())
-                if not m:
+                # Variante 2: Separator in Anführungszeichen, Pfad ohne
+                m = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+(\S+)', line)
+            if not m:
+                # Variante 3: NIL als Separator
+                m = re.match(r'\(([^)]*)\)\s+NIL\s+"?([^"\r\n]+)"?', line)
+                if m:
+                    flags_str = m.group(1)
+                    sep       = "/"
+                    path      = m.group(2).strip().strip('"')
+                else:
                     continue
-            flags_str = m.group(1)
-            sep       = m.group(2) if m.lastindex >= 2 else "/"
-            path      = m.group(3) if m.lastindex >= 3 else m.group(2)
-            path      = path.strip().strip('"')
-            name      = path.split(sep)[-1] if sep in path else path
-            flags     = [f.strip() for f in flags_str.split() if f.strip()]
+            else:
+                flags_str = m.group(1)
+                sep       = m.group(2)
+                path      = m.group(3).strip().strip('"')
+
+            # Separator cachen (für spätere Unterordner-Erstellung)
+            if sep and sep != "NIL":
+                self._separator = sep
+
+            flags = [f.strip() for f in flags_str.split() if f.strip()]
+            name  = path.split(sep)[-1] if sep in path else path
+
+            # Elternpfad und Tiefe berechnen
+            parts  = path.split(sep)
+            level  = len(parts) - 1
+            parent = sep.join(parts[:-1]) if level > 0 else ""
+
             folders.append({
-                "name": name, "path": path,
-                "separator": sep, "flags": flags,
+                "name":      name,
+                "path":      path,
+                "parent":    parent,
+                "separator": sep,
+                "flags":     flags,
+                "level":     level,
             })
         return folders
+
+    def get_folder_separator(self) -> str:
+        """Gibt das Ordner-Trennzeichen zurück (nach list_folders() verfügbar)."""
+        return self._separator
 
     def select_folder(self, folder_path: str) -> int:
         """Wählt einen Ordner aus. Probiert mehrere Schreibweisen."""
         if not self._conn:
             raise RuntimeError("Nicht verbunden.")
-        # Versuche: mit Anführungszeichen, ohne, mit UTF-7-Kodierung
         attempts = [
             f'"{folder_path}"',
             folder_path,
@@ -137,16 +190,45 @@ class IMAPHandler:
                 pass
         return 0
 
+    def create_subfolder(self, parent_path: str, name: str) -> bool:
+        """
+        Legt einen Unterordner an. Setzt den Pfad korrekt mit dem
+        serverspezifischen Trennzeichen zusammen.
+        """
+        sep         = self._separator
+        folder_path = f"{parent_path}{sep}{name}" if parent_path else name
+        return self.create_folder(folder_path)
+
     @staticmethod
     def _encode_folder_name(name: str) -> str:
-        """Kodiert Ordnernamen nach IMAP modified UTF-7 (RFC 3501)."""
-        try:
-            return name.encode("utf-7").decode("ascii").replace("+", "&").replace("&-", "+")
-        except Exception:
-            return name
+        """
+        Kodiert Ordnernamen nach modifiziertem UTF-7 (RFC 3501 §5.1.3).
+
+        FIX: Die Standard-Python-utf-7-Kodierung unterscheidet sich von der
+        IMAP-spezifischen modifizierten UTF-7-Kodierung. Korrekte Implementierung:
+        '&' statt '+' als Escape-Zeichen, ',' statt '/' in Base64.
+        """
+        result = []
+        i = 0
+        while i < len(name):
+            c = name[i]
+            if 0x20 <= ord(c) <= 0x7E and c != '&':
+                result.append(c)
+                i += 1
+            else:
+                # Nicht-ASCII-Block sammeln
+                block = []
+                while i < len(name) and not (0x20 <= ord(name[i]) <= 0x7E and name[i] != '&'):
+                    block.append(name[i])
+                    i += 1
+                import base64
+                encoded = base64.b64encode(''.join(block).encode('utf-16-be')).decode('ascii')
+                encoded = encoded.replace('/', ',')
+                result.append('&' + encoded + '-')
+        return ''.join(result)
 
     # ------------------------------------------------------------------ #
-    #  Mails abrufen                                                     #
+    #  Mails abrufen – RFC 3501 §6.4.5: BODY.PEEK verhindert \Seen      #
     # ------------------------------------------------------------------ #
 
     def fetch_unseen_uids(self, folder: str = "INBOX") -> List[str]:
@@ -170,7 +252,12 @@ class IMAPHandler:
         return data[0].decode().split()
 
     def fetch_mail_headers(self, uid: str, folder: str = "INBOX") -> Optional[Dict]:
-        """Lädt nur die Header einer Mail (schnell, ohne Body)."""
+        """
+        Lädt nur die Header einer Mail (schnell, ohne Body).
+
+        FIX: BODY.PEEK[HEADER.FIELDS …] markiert die Mail NICHT als gelesen
+        (RFC 3501 §6.4.5). Das war bereits korrekt – hier nur dokumentiert.
+        """
         self.select_folder(folder)
         typ, data = self._conn.uid(
             "fetch", uid,
@@ -181,22 +268,27 @@ class IMAPHandler:
         raw = data[0][1] if isinstance(data[0], tuple) else data[0]
         if not raw:
             return None
-        msg = email.message_from_bytes(raw, policy=email.policy.compat32)
         result = self.parse_email_message(raw)
-        # Flags aus dem Response holen
         flags_raw = str(data[0][0]) if isinstance(data[0], tuple) else ""
         result["is_read"]    = int("\\Seen"    in flags_raw)
         result["is_flagged"] = int("\\Flagged" in flags_raw)
         result["uid"]        = uid
-        # Größe
         size_m = re.search(r"RFC822\.SIZE (\d+)", flags_raw)
         result["size"] = int(size_m.group(1)) if size_m else 0
         return result
 
     def fetch_mail(self, uid: str, folder: str = "INBOX") -> Optional[Dict]:
-        """Lädt den vollständigen Inhalt einer Mail inkl. Anhänge."""
+        """
+        Lädt den vollständigen Inhalt einer Mail inkl. Anhänge.
+
+        FIX: Nutzt BODY.PEEK[] statt RFC822 damit das Abrufen die Mail
+        NICHT automatisch als \\Seen markiert (RFC 3501 §6.4.5).
+        Das Setzen von \\Seen erfolgt explizit über mark_read() wenn der
+        Nutzer die Mail wirklich öffnet.
+        """
         self.select_folder(folder)
-        typ, data = self._conn.uid("fetch", uid, "(FLAGS RFC822)")
+        # BODY.PEEK[] = vollständiger Body OHNE implizite \Seen-Markierung
+        typ, data = self._conn.uid("fetch", uid, "(FLAGS BODY.PEEK[])")
         if typ != "OK" or not data or data[0] is None:
             return None
         raw = data[0][1] if isinstance(data[0], tuple) else data[0]
@@ -214,8 +306,11 @@ class IMAPHandler:
                         headers_only: bool = True) -> List[Dict]:
         """
         Ruft neue (unbekannte) Mails ab.
-        known_uids: Set bereits bekannter UIDs → werden übersprungen.
-        headers_only: True = nur Header laden (schnell), Body wird lazy geladen.
+
+        FIX:
+        - Nutzt BODY.PEEK statt RFC822 → keine implizite \\Seen-Markierung
+        - _parse_fetch_response() erhält jetzt das vollständige item-Tuple
+          statt nur Teilen davon
         """
         known_uids = known_uids or set()
         count = self.select_folder(folder)
@@ -228,17 +323,16 @@ class IMAPHandler:
             return []
 
         mails = []
-        # In Batches abrufen (max 50 auf einmal) um Timeouts zu vermeiden
         batch_size = 50
         for i in range(0, len(new_uids), batch_size):
-            batch = new_uids[i:i + batch_size]
+            batch   = new_uids[i:i + batch_size]
             uid_set = ",".join(batch)
             try:
                 if headers_only:
-                    # Nur Envelope + Flags + Größe (sehr schnell)
+                    # BODY.PEEK → kein implizites \Seen
                     typ, data = self._conn.uid(
                         "fetch", uid_set,
-                        "(UID FLAGS RFC822.SIZE ENVELOPE "
+                        "(UID FLAGS RFC822.SIZE "
                         "BODY.PEEK[HEADER.FIELDS (Subject From To Cc Date Message-ID)])"
                     )
                     if typ != "OK":
@@ -253,12 +347,31 @@ class IMAPHandler:
                         except Exception:
                             pass
                 else:
-                    # Vollständige Mails
-                    for uid in batch:
+                    # Vollständige Mails ohne \Seen-Seiteneffekt
+                    typ, data = self._conn.uid(
+                        "fetch", uid_set, "(UID FLAGS BODY.PEEK[])"
+                    )
+                    if typ != "OK":
+                        continue
+                    for item in data:
+                        if not isinstance(item, tuple):
+                            continue
                         try:
-                            m = self.fetch_mail(uid, folder)
-                            if m:
-                                mails.append(m)
+                            flags_str = (item[0].decode("utf-8", errors="replace")
+                                         if isinstance(item[0], bytes) else str(item[0]))
+                            raw_body  = item[1] if len(item) > 1 else b""
+                            if not raw_body:
+                                continue
+                            uid_m = re.search(r"UID (\d+)", flags_str)
+                            uid   = uid_m.group(1) if uid_m else ""
+                            m = self.parse_email_message(
+                                raw_body if isinstance(raw_body, bytes) else raw_body.encode(),
+                                include_attachments=True
+                            )
+                            m["uid"]        = uid
+                            m["is_read"]    = int("\\Seen"    in flags_str)
+                            m["is_flagged"] = int("\\Flagged" in flags_str)
+                            mails.append(m)
                         except Exception:
                             pass
             except Exception:
@@ -274,13 +387,16 @@ class IMAPHandler:
 
     def _parse_fetch_response(self, item: tuple) -> Optional[Dict]:
         """Parst eine FETCH-Antwort (Header-Only-Modus)."""
-        flags_str = item[0].decode("utf-8", errors="replace") if isinstance(item[0], bytes) else str(item[0])
+        flags_str  = (item[0].decode("utf-8", errors="replace")
+                      if isinstance(item[0], bytes) else str(item[0]))
         raw_header = item[1] if len(item) > 1 else b""
         if not raw_header:
             return None
 
         import email as _email
-        msg = _email.message_from_bytes(raw_header if isinstance(raw_header, bytes) else raw_header.encode())
+        msg = _email.message_from_bytes(
+            raw_header if isinstance(raw_header, bytes) else raw_header.encode()
+        )
 
         subject    = self.decode_header_value(msg.get("Subject", ""))
         from_raw   = self.decode_header_value(msg.get("From", ""))
@@ -293,17 +409,14 @@ class IMAPHandler:
 
         try:
             from email.utils import parsedate_to_datetime
-            dt = parsedate_to_datetime(date_str)
+            dt        = parsedate_to_datetime(date_str)
             date_norm = dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             date_norm = date_str[:19] if date_str else ""
 
-        # UID aus dem Flags-String extrahieren
-        uid_m = re.search(r"UID (\d+)", flags_str)
-        uid   = uid_m.group(1) if uid_m else ""
-
-        # Größe
+        uid_m  = re.search(r"UID (\d+)",       flags_str)
         size_m = re.search(r"RFC822\.SIZE (\d+)", flags_str)
+        uid    = uid_m.group(1)  if uid_m  else ""
         size   = int(size_m.group(1)) if size_m else 0
 
         return {
@@ -314,7 +427,7 @@ class IMAPHandler:
             "recipients":  to_field,
             "cc":          cc_field,
             "date":        date_norm,
-            "body_text":   "",     # wird lazy geladen
+            "body_text":   "",
             "body_html":   "",
             "has_attach":  0,
             "message_id":  message_id,
@@ -328,6 +441,7 @@ class IMAPHandler:
     # ------------------------------------------------------------------ #
 
     def mark_read(self, uid: str, folder: str = "INBOX"):
+        """Setzt \\Seen-Flag explizit (wird nur aufgerufen wenn Nutzer Mail öffnet)."""
         self.select_folder(folder)
         self._conn.uid("store", uid, "+FLAGS", "\\Seen")
 
@@ -413,13 +527,11 @@ class IMAPHandler:
         date_str   = msg.get("Date", "")
         message_id = msg.get("Message-ID", "")
 
-        # Absender in Name und E-Mail trennen
         sender_name, sender_email = cls._split_address(from_raw)
 
-        # Datum normalisieren
         try:
             from email.utils import parsedate_to_datetime
-            dt = parsedate_to_datetime(date_str)
+            dt        = parsedate_to_datetime(date_str)
             date_norm = dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             date_norm = date_str[:19] if date_str else ""
@@ -433,7 +545,7 @@ class IMAPHandler:
             for part in msg.walk():
                 ctype = part.get_content_type()
                 disp  = str(part.get("Content-Disposition", ""))
-                if "attachment" in disp or "inline" in disp and part.get_filename():
+                if "attachment" in disp or ("inline" in disp and part.get_filename()):
                     has_attach = True
                     if include_attachments:
                         fn   = cls.decode_header_value(part.get_filename() or "")

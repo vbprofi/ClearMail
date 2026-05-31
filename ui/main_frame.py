@@ -30,6 +30,8 @@ class MainFrame(wx.Frame):
         self._selected_folder_name = ""
         self._mark_read_timer      = None   # wx.CallLater für „Als gelesen nach X Sek."
         self._is_offline           = False  # Offline-Modus
+        from core.auto_fetch import AutoFetchManager
+        self._auto_fetch           = AutoFetchManager()
 
         self._build_menu()
         self._build_status_bar()
@@ -227,6 +229,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_save_txt,     self.mi_save_txt)
         self.Bind(wx.EVT_MENU, self._on_print,        self.mi_print)
         self.Bind(wx.EVT_MENU, self._on_exit,         self.mi_exit)
+        self.Bind(wx.EVT_CLOSE,                        self._on_window_close)
         self.Bind(wx.EVT_MENU, self._on_reply,        self.mi_reply)
         self.Bind(wx.EVT_MENU, self._on_reply_all,    self.mi_reply_all)
         self.Bind(wx.EVT_MENU, self._on_forward,      self.mi_forward)
@@ -806,13 +809,14 @@ class MainFrame(wx.Frame):
         self.controller.set_setting("offline_mode", "1" if self._is_offline else "0")
 
     def _on_offline_sync(self, event):
-        """Im Offline-Modus: jetzt synchronisieren."""
-        if self._is_offline:
-            self._is_offline = False
-            self.mi_offline_work.Check(False)
-            self.mi_offline_sync.Enable(False)
-            self.controller.set_setting("offline_mode", "0")
-            self._run_fetch()
+        """Im Offline-Modus: jetzt synchronisieren – mit Statusbar + Gauge."""
+        # Offline-Modus temporär deaktivieren damit _run_fetch nicht abbricht
+        self._is_offline = False
+        self.mi_offline_work.Check(False)
+        self.mi_offline_sync.Enable(False)
+        self.controller.set_setting("offline_mode", "0")
+        self.status_bar.SetStatusText(tr("fetch_running"), 0)
+        self._run_fetch()   # nutzt ProtocolWorker mit Gauge + Prozentanzeige
 
 
 
@@ -888,7 +892,11 @@ class MainFrame(wx.Frame):
     # ------------------------------------------------------------------ #
 
     def _on_settings(self, event):
-        dlg = SettingsDialog(self, self.controller); dlg.ShowModal(); dlg.Destroy()
+        dlg = SettingsDialog(self, self.controller)
+        dlg.ShowModal()
+        dlg.Destroy()
+        # Auto-Fetch neu starten falls Einstellungen geändert
+        self._start_auto_fetch()
 
     def _on_pgp(self, event):
         dlg = PGPDialog(self); dlg.ShowModal(); dlg.Destroy()
@@ -908,6 +916,11 @@ class MainFrame(wx.Frame):
 
     def _on_about(self, event):
         dlg = AboutDialog(self); dlg.ShowModal(); dlg.Destroy()
+
+    def _on_window_close(self, event):
+        """Auto-Fetch-Threads sauber beenden bevor das Fenster geschlossen wird."""
+        self._auto_fetch.stop_all()
+        event.Skip()  # normales Schließen fortsetzen
 
     def _on_exit(self, event):
         self.Close()
@@ -1032,27 +1045,48 @@ class MainFrame(wx.Frame):
             viewer.Show()
 
     def _restore_last_folder(self):
-        """Stellt den zuletzt ausgewählten Ordner wieder her.
-        Fallback: erster Posteingang in der Baumstruktur."""
-        # Zuerst Sortierung wiederherstellen
+        """Stellt den zuletzt ausgewählten Ordner wieder her."""
         self._restore_sort_settings()
 
         last_id = self.controller.get_setting("last_folder_id", "")
         if last_id:
             try:
                 self.folder_panel.select_folder_by_id(int(last_id))
-                # Letzte ausgewählte Mail in diesem Ordner wiederherstellen
                 wx.CallAfter(self._restore_last_mail, int(last_id))
-                return
             except (ValueError, Exception):
                 pass
-        # Fallback: ersten Posteingang auswählen
-        for mb in self.controller.get_mailboxes():
-            for f in self.controller.get_folders(mb["id"]):
-                if dict(f).get("folder_type") == "inbox":
-                    self.folder_panel.select_folder_by_id(f["id"])
-                    wx.CallAfter(self._restore_last_mail, f["id"])
-                    return
+        else:
+            for mb in self.controller.get_mailboxes():
+                for f in self.controller.get_folders(mb["id"]):
+                    if dict(f).get("folder_type") == "inbox":
+                        self.folder_panel.select_folder_by_id(f["id"])
+                        wx.CallAfter(self._restore_last_mail, f["id"])
+                        break
+
+        # Auto-Fetch starten wenn aktiviert
+        wx.CallAfter(self._start_auto_fetch)
+
+    def _start_auto_fetch(self):
+        """Startet/stoppt Auto-Fetch-Threads nach aktuellen Einstellungen."""
+        enabled  = self.controller.get_setting("auto_fetch", "0") == "1"
+        interval = int(self.controller.get_setting("fetch_interval", "10"))
+        if enabled and not getattr(self, "_is_offline", False):
+            self._auto_fetch.start(
+                controller=self.controller,
+                interval_min=interval,
+                on_new_mails=self._on_auto_fetch_done,
+            )
+        else:
+            self._auto_fetch.stop_all()
+
+    def _on_auto_fetch_done(self, count: int):
+        """Wird nach erfolgreichem Auto-Fetch im Haupt-Thread aufgerufen."""
+        self.status_bar.SetStatusText(tr("imap_fetch_ok", count=count), 0)
+        self.folder_panel.reload()
+        if self._selected_folder_id:
+            mails = self.controller.get_mails(self._selected_folder_id)
+            self.mail_list_panel.load_mails(mails)
+            self.folder_panel.refresh_folder_unread(self._selected_folder_id)
 
     def _restore_last_mail(self, folder_id: int):
         """Wählt die zuletzt fokussierte Mail im Ordner wieder aus."""

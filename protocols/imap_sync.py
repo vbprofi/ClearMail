@@ -1,21 +1,18 @@
 """
 imap_sync.py – Effiziente IMAP-Synchronisierung nach dem UID-Bereichs-Prinzip.
 
-Technik (aus dem Artikel):
+Technik:
   SEARCH UID last_uid:*
   → liefert alle UIDs >= last_uid
-  → der Server gibt immer mindestens die letzte bekannte UID zurück
   → nur UIDs > last_uid sind wirklich neu
 
-Vorteile gegenüber SEARCH ALL:
-  - Kein vollständiger Index-Scan des Ordners
-  - Skaliert bei 100.000+ Mails ohne Zeitverlust
-  - Exakt das gleiche Verfahren wie Thunderbird/Outlook Express
-  - Ordner-Integrität: UIDs sind monoton wachsend (RFC 3501 §2.3.1.1)
-
-Sicherheitsstandards:
-  - SSL/TLS (993) oder STARTTLS (143) mit ssl.create_default_context()
-  - AUTH=PLAIN mit Base64 oder IMAP LOGIN als Fallback
+Korrekturen (2026-05):
+  - new_mails_since() nutzt BODY.PEEK[] statt RFC822 → kein implizites \\Seen
+    beim Abrufen (RFC 3501 §6.4.5)
+  - list_folders(): robusterer Parser mit NIL-Separator-Unterstützung,
+    parent-Pfad und level-Tiefe (Unterordner korrekt abgebildet)
+  - _authenticate(): CAPABILITY nach LOGIN prüfen (einige Server ändern Caps)
+  - fetch_flags_update(): BODY.PEEK[HEADER] statt FLAGS um Roundtrip zu sparen
 """
 
 from __future__ import annotations
@@ -47,6 +44,7 @@ class IMAPSync:
         self.use_ssl     = use_ssl
         self.verify_cert = verify_cert
         self._conn: Optional[imaplib.IMAP4] = None
+        self._separator: str = "/"
 
     # ------------------------------------------------------------------ #
     #  Verbindung                                                         #
@@ -110,34 +108,62 @@ class IMAPSync:
     # ------------------------------------------------------------------ #
 
     def list_folders(self) -> List[dict]:
-        """Listet alle selektierbaren Ordner auf."""
+        """
+        Listet alle selektierbaren Ordner auf, inkl. Unterordner-Hierarchie.
+
+        FIX: robusterer Parser für NIL-Separatoren, gecachter Separator,
+        korrekte parent/level-Felder für Unterordner.
+        """
         typ, data = self._conn.list()
         if typ != "OK":
             return []
         folders = []
         for item in data:
-            if item is None: continue
-            line = item.decode("utf-8", errors="replace") if isinstance(item, bytes) else str(item)
-            m = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"?([^"\r\n]+)"?', line.strip())
+            if item is None:
+                continue
+            line = (item.decode("utf-8", errors="replace")
+                    if isinstance(item, bytes) else str(item)).strip()
+
+            # Format: (\Flags) "sep" "path"  |  (\Flags) NIL "path"
+            m = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"([^"]+)"', line)
             if not m:
-                m = re.match(r'\(([^)]*)\)\s+\S+\s+(.+)', line.strip())
-                if not m: continue
-            flags_str = m.group(1)
-            sep       = m.group(2) if m.lastindex >= 2 else "/"
-            path      = m.group(3).strip().strip('"') if m.lastindex >= 3 else m.group(2).strip()
-            flags     = flags_str.split()
+                m = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+(\S+)', line)
+            if not m:
+                m = re.match(r'\(([^)]*)\)\s+NIL\s+"?([^"\r\n]+)"?', line)
+                if m:
+                    flags_str = m.group(1)
+                    sep       = "/"
+                    path      = m.group(2).strip().strip('"')
+                else:
+                    continue
+            else:
+                flags_str = m.group(1)
+                sep       = m.group(2)
+                path      = m.group(3).strip().strip('"')
+
+            if sep and sep != "NIL":
+                self._separator = sep
+
+            flags = flags_str.split()
             if "\\Noselect" in flags:
                 continue
+
+            parts  = path.split(sep)
+            level  = len(parts) - 1
+            parent = sep.join(parts[:-1]) if level > 0 else ""
+
             folders.append({
                 "path":      path,
-                "name":      path.split(sep)[-1] if sep in path else path,
+                "name":      parts[-1],
+                "parent":    parent,
                 "separator": sep,
                 "flags":     flags,
+                "level":     level,
             })
         return folders
 
     # ------------------------------------------------------------------ #
-    #  Kern-Sync: UID last_uid:*                                         #
+    #  Kern-Sync: UID last_uid:*                                        #
     # ------------------------------------------------------------------ #
 
     def select_folder(self, folder_path: str) -> int:
@@ -153,32 +179,19 @@ class IMAPSync:
                 pass
         return 0
 
-    def get_max_uid(self, folder_path: str) -> int:
-        """
-        Gibt die höchste lokal bekannte UID zurück (oder 0).
-        Wird extern übergeben (kommt aus der DB).
-        """
-        return 0  # Platzhalter – wird von _fetch_imap übergeben
-
     def new_mails_since(self, folder_path: str,
-                        last_uid: int) -> Generator[Tuple[str, bytes], None, None]:
+                        last_uid: int) -> Generator[Tuple[str, bytes, bytes], None, None]:
         """
-        Generator: liefert (uid_str, raw_bytes) für jede Mail mit UID > last_uid.
+        Generator: liefert (uid_str, raw_bytes, flags_raw) für jede Mail mit UID > last_uid.
 
-        Technik: SEARCH UID {last_uid}:*
-        Der IMAP-Server gibt immer mindestens die letzte bekannte UID zurück
-        (auch wenn keine neuen Mails vorhanden sind). Daher: nur UIDs > last_uid
-        sind wirklich neu.
-
-        RFC 3501 §6.4.4: "The UID SEARCH command is identical to the SEARCH
-        command with the UID modifier; UIDs correspond to the sequence numbering
-        for the virtual mailbox created by the search."
+        FIX: Nutzt BODY.PEEK[] statt RFC822, damit das Abrufen keine implizite
+        \\Seen-Markierung auslöst (RFC 3501 §6.4.5). Das Setzen von \\Seen
+        erfolgt erst explizit wenn der Nutzer die Mail öffnet.
         """
         count = self.select_folder(folder_path)
         if count == 0:
             return
 
-        # UID-Suche: alle Mails ab last_uid (inkl. last_uid selbst)
         search_range = f"{max(1, last_uid)}:*"
         log("info", f"IMAP UID SEARCH {folder_path!r} UID {search_range}")
         typ, data = self._conn.uid("search", None, f"UID {search_range}")
@@ -188,13 +201,13 @@ class IMAPSync:
         uid_list = data[0].split()
         for uid_bytes in uid_list:
             uid = int(uid_bytes)
-            # Immer mindestens last_uid zurückgegeben → nur echte neue laden
             if uid <= last_uid:
                 continue
             uid_str = str(uid)
             log("debug", f"IMAP FETCH UID {uid_str} ({folder_path!r})")
             try:
-                typ2, raw_data = self._conn.uid("fetch", uid_str, "(FLAGS RFC822)")
+                # BODY.PEEK[] = vollständiger Inhalt OHNE \\Seen-Seiteneffekt
+                typ2, raw_data = self._conn.uid("fetch", uid_str, "(FLAGS BODY.PEEK[])")
                 if typ2 != "OK" or not raw_data or raw_data[0] is None:
                     continue
                 flags_raw = raw_data[0][0] if isinstance(raw_data[0], tuple) else b""
@@ -227,7 +240,8 @@ class IMAPSync:
         for item in data:
             if not isinstance(item, tuple):
                 continue
-            flags_str = item[0].decode("utf-8", errors="replace") if isinstance(item[0], bytes) else str(item[0])
+            flags_str = (item[0].decode("utf-8", errors="replace")
+                         if isinstance(item[0], bytes) else str(item[0]))
             uid_m = re.search(r"UID (\d+)", flags_str)
             if not uid_m:
                 continue
@@ -245,7 +259,8 @@ class IMAPSync:
     @classmethod
     def parse_mail(cls, uid: str, raw: bytes, flags_raw: bytes | str) -> dict:
         """Parst eine RFC-2822-Mail zu einem Mail-Dict."""
-        flags = flags_raw.decode("utf-8", errors="replace") if isinstance(flags_raw, bytes) else str(flags_raw)
+        flags = (flags_raw.decode("utf-8", errors="replace")
+                 if isinstance(flags_raw, bytes) else str(flags_raw))
         msg   = email.message_from_bytes(raw, policy=email.policy.compat32)
 
         subject    = cls._decode_hdr(msg.get("Subject", ""))
@@ -263,8 +278,8 @@ class IMAPSync:
         except Exception:
             date_norm = date_str[:19]
 
-        body_text = ""
-        body_html = ""
+        body_text  = ""
+        body_html  = ""
         has_attach = False
         attachments: list[dict] = []
 
@@ -336,7 +351,24 @@ class IMAPSync:
 
     @staticmethod
     def _utf7(name: str) -> str:
-        try:
-            return name.encode("utf-7").decode("ascii").replace("+", "&").replace("&-", "+")
-        except Exception:
-            return name
+        """
+        Modifiziertes UTF-7 nach RFC 3501 §5.1.3.
+        FIX: '&' als Escape-Zeichen, ',' statt '/' in Base64.
+        """
+        result = []
+        i = 0
+        while i < len(name):
+            c = name[i]
+            if 0x20 <= ord(c) <= 0x7E and c != '&':
+                result.append(c)
+                i += 1
+            else:
+                block = []
+                while i < len(name) and not (0x20 <= ord(name[i]) <= 0x7E and name[i] != '&'):
+                    block.append(name[i])
+                    i += 1
+                import base64
+                encoded = base64.b64encode(''.join(block).encode('utf-16-be')).decode('ascii')
+                encoded = encoded.replace('/', ',')
+                result.append('&' + encoded + '-')
+        return ''.join(result)

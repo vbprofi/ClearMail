@@ -39,14 +39,9 @@ class AppController:
         return self.db.get_mails(folder_id)
 
     def get_mail(self, mail_id: int, folder_id: int = None):
-        mail = self.db.get_mail(mail_id, folder_id)
-        if mail and not int(mail["is_read"] or 0):
-            fid = int(mail["folder_id"] or folder_id or 0)
-            self.db.mark_mail_read(mail_id, True, folder_id=fid)
-            if fid:
-                self.db.update_folder_unread(fid)
-            self.addon_mgr.fire("mail_read", {"mail_id": mail_id})
-        return mail
+        """Lädt eine Mail. Markiert sie NICHT automatisch als gelesen –
+        das steuert ausschließlich _on_mail_selected im MainFrame."""
+        return self.db.get_mail(mail_id, folder_id)
 
     def delete_mail(self, mail_id: int, folder_id: int,
                     mailbox_id: int = None, use_trash: bool = None) -> str:
@@ -487,6 +482,12 @@ class AppController:
           passenden Server-Ordner zusammengeführt (per folder_type).
         - Ordnernamen werden lokalisiert angezeigt.
         - Keine Duplikate.
+
+        FIX: Unterordner werden jetzt korrekt mit parent_id verknüpft.
+        Die server_folders-Liste muss die Felder "parent" und "separator"
+        enthalten (geliefert von IMAPSync.list_folders / IMAPHandler.list_folders).
+        Verarbeitung von Top-Level → Unterordner (nach level sortiert) stellt
+        sicher dass Eltern-IDs beim Einfügen des Kindes bereits bekannt sind.
         """
         from core.i18n import tr
         sc = self.db._get_structure_conn()
@@ -520,17 +521,31 @@ class AppController:
             elif r["folder_type"] and r["folder_type"] not in ("outbox",):
                 existing_by_type[r["folder_type"]] = r["id"]
 
-        folder_map = {}
-        for sf in server_folders:
+        # FIX: Verarbeitung nach Tiefe (level) sortieren, damit Eltern zuerst
+        # angelegt werden und ihre IDs für Kinder verfügbar sind.
+        sorted_folders = sorted(server_folders, key=lambda f: f.get("level", 0))
+
+        folder_map = {}   # imap_path → local folder_id
+        for sf in sorted_folders:
             path  = sf["path"]
             ftype = self._guess_folder_type(sf["name"])
             local_name = LOCALIZED.get(ftype, sf["name"])
 
+            # FIX: parent_id aus dem Elternpfad ermitteln
+            parent_path = sf.get("parent", "")
+            parent_id   = folder_map.get(parent_path) if parent_path else None
+
             if path in existing_by_imap:
-                # Bereits synchronisiert
-                folder_map[path] = existing_by_imap[path]
-            elif ftype in existing_by_type:
-                # Platzhalter zusammenführen: imap_path + lokalisierten Namen setzen
+                # Bereits synchronisiert – parent_id ggf. aktualisieren
+                fid = existing_by_imap[path]
+                if parent_id is not None:
+                    sc.execute(
+                        "UPDATE folders SET parent_id=? WHERE id=? AND parent_id IS NULL",
+                        (parent_id, fid)
+                    )
+                folder_map[path] = fid
+            elif ftype in existing_by_type and parent_id is None:
+                # Platzhalter zusammenführen (nur für Top-Level-Systemordner)
                 fid = existing_by_type.pop(ftype)
                 sc.execute(
                     "UPDATE folders SET imap_path=?, name=? WHERE id=?",
@@ -539,12 +554,12 @@ class AppController:
                 folder_map[path] = fid
                 existing_by_imap[path] = fid
             else:
-                # Neuen Ordner anlegen
+                # Neuen Ordner anlegen – mit korrektem parent_id
                 sc.execute(
                     "INSERT INTO folders "
                     "(mailbox_id, parent_id, name, folder_type, imap_path, unread) "
-                    "VALUES (?, NULL, ?, ?, ?, 0)",
-                    (mb_id, local_name, ftype, path)
+                    "VALUES (?, ?, ?, ?, ?, 0)",
+                    (mb_id, parent_id, local_name, ftype, path)
                 )
                 fid = sc.execute("SELECT last_insert_rowid()").fetchone()[0]
                 folder_map[path] = fid
